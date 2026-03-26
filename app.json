@@ -18,6 +18,11 @@
         "backgroundColor": "#0a0a0a"
       },
       "package": "com.homepokertracker.app"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "4aee7a77-ada7-4ebc-9c3b-3929fb04bd5f"
+      }
     }
   }
 }
