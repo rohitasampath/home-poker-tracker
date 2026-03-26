@@ -3,6 +3,7 @@
     "name": "Home Poker Tracker",
     "slug": "home-poker-tracker",
     "version": "1.0.0",
+    "owner": "rohitsampath-organization",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "splash": {
