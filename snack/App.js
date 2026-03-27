@@ -1,11 +1,15 @@
 import React, { useState, useCallback, useContext, useReducer, createContext, useEffect } from 'react';
+import { registerRootComponent } from 'expo';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { enableScreens } from 'react-native-screens';
 import { useWindowDimensions } from 'react-native';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
   Modal, TextInput, Alert, Pressable, ScrollView, Share, SafeAreaView, Linking,
 } from 'react-native';
+
+enableScreens();
 
 // ─── Theme ───────────────────────────────────────────────────────────────────
 const C = {
@@ -1779,7 +1783,7 @@ const gs = StyleSheet.create({
 });
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
-export default function App() {
+function App() {
   const [gameId, setGameId] = useState(null);
   return (
     <SafeAreaProvider>
@@ -1789,3 +1793,5 @@ export default function App() {
     </SafeAreaProvider>
   );
 }
+
+registerRootComponent(App);
