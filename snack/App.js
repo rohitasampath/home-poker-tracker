@@ -1639,7 +1639,10 @@ function GameScreen({ id, onBack }) {
 
         {/* Players */}
         <Text style={gs.secTitle}>Players</Text>
-          <View style={[gs.emptyBox, { marginBottom: 10 }]}><Text style={{ color: C.textMuted, fontSize: 14 }}>No players yet — add someone to start</Text></View>
+        {game.players.length === 0 && (
+          <View style={[gs.emptyBox, { marginBottom: 10 }]}>
+            <Text style={{ color: C.textMuted, fontSize: 14 }}>No players yet — add someone to start</Text>
+          </View>
         )}
         {game.players.map(player => {
           const bi = totalBuyIn(player), net = playerNet(player), hasOut = player.cashOut !== null;
