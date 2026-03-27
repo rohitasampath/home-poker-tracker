@@ -1,15 +1,28 @@
 import React, { useState, useCallback, useContext, useReducer, createContext, useEffect } from 'react';
-import { registerRootComponent } from 'expo';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { enableScreens } from 'react-native-screens';
 import { useWindowDimensions } from 'react-native';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
-  Modal, TextInput, Alert, Pressable, ScrollView, Share, SafeAreaView, Linking,
+  Modal, TextInput, Alert, Pressable, ScrollView, Share, SafeAreaView, Linking, Switch,
 } from 'react-native';
 
-enableScreens();
+// Graceful optional imports — present in standalone APK/IPA builds, absent in Expo Snack
+let registerRootComponent, SafeAreaProvider, useSafeAreaInsets;
+try { ({ registerRootComponent } = require('expo')); } catch {}
+try { ({ SafeAreaProvider, useSafeAreaInsets } = require('react-native-safe-area-context')); } catch {}
+try { require('react-native-screens').enableScreens(); } catch {}
+try { require('@react-native-async-storage/async-storage'); } catch {}
+
+// Fallbacks for Expo Snack (uses built-in AsyncStorage via global)
+let AsyncStorage;
+try { AsyncStorage = require('@react-native-async-storage/async-storage').default; } catch {}
+if (!AsyncStorage) {
+  // No-op shim so the app runs without persistence in Snack
+  AsyncStorage = { getItem: async () => null, setItem: async () => {}, removeItem: async () => {} };
+}
+
+// SafeAreaProvider/useSafeAreaInsets fallbacks for Snack
+if (!SafeAreaProvider) SafeAreaProvider = ({ children }) => children;
+if (!useSafeAreaInsets) useSafeAreaInsets = () => ({ top: 0, bottom: 0, left: 0, right: 0 });
 
 // ─── Theme ───────────────────────────────────────────────────────────────────
 const C = {
@@ -44,15 +57,45 @@ function calcSettlements(players) {
 }
 function shareText(game) {
   const date = new Date(game.date).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-  const lines = [`🃏 ${game.name}`, `📅 ${date}`, '', '── RESULTS ──',
-    ...game.players.map(p => {
-      const bi = totalBuyIn(p), co = p.cashOut ?? 0, net = playerNet(p);
-      return `${net > 0 ? '▲' : net < 0 ? '▼' : '–'} ${p.name}: in ${fmt(bi)} / out ${fmt(co)}  (${fmtNet(net)})`;
-    })];
-  const s = calcSettlements(game.players);
-  if (s.length) { lines.push('', '── SETTLE UP ──'); s.forEach(x => lines.push(`  ${x.from} → ${x.to}  ${fmt(x.amount)}`)); }
+
+  // Column widths
+  const names = game.players.map(p => p.name);
+  const maxName = Math.max(6, ...names.map(n => n.length));
+  const col = (str, width) => String(str).padEnd(width);
+  const rcol = (str, width) => String(str).padStart(width);
+
+  const header = `${'PLAYER'.padEnd(maxName)}  ${'BUY-IN'.padStart(7)}  ${'CASH-OUT'.padStart(8)}  ${'NET'.padStart(8)}`;
+  const divider = '─'.repeat(header.length);
+
+  const rows = game.players.map(p => {
+    const bi = totalBuyIn(p), co = p.cashOut ?? 0, net = playerNet(p);
+    const netStr = net > 0.005 ? `+${fmt(net)}` : net < -0.005 ? `-${fmt(Math.abs(net))}` : '$0';
+    const trend = net > 0.005 ? '▲' : net < -0.005 ? '▼' : '–';
+    return `${trend} ${col(p.name, maxName)}  ${rcol(fmt(bi), 7)}  ${rcol(p.cashOut !== null ? fmt(co) : '—', 8)}  ${rcol(netStr, 8)}`;
+  });
+
   const pot = game.players.reduce((s, p) => s + totalBuyIn(p), 0);
-  lines.push('', `Total pot: ${fmt(pot)}`);
+  const tableAmt = game.tableAmount;
+  const s = calcSettlements(game.players);
+
+  const lines = [
+    `🃏 ${game.name}`,
+    `🗓  ${date}`,
+    '',
+    divider,
+    `  ${header}`,
+    divider,
+    ...rows.map(r => `  ${r}`),
+    divider,
+    `  ${'Total Pot'.padEnd(maxName + 2)}  ${rcol(fmt(pot), 7)}`,
+  ];
+  if (tableAmt !== null && tableAmt > 0) {
+    lines.push(`  ${'Table'.padEnd(maxName + 2)}  ${rcol(fmt(tableAmt), 7)}`);
+  }
+  if (s.length) {
+    lines.push('', '── SETTLE UP ──');
+    s.forEach(x => lines.push(`  ${x.from} → ${x.to}   ${fmt(x.amount)}`));
+  }
   return lines.join('\n');
 }
 
@@ -89,9 +132,11 @@ function getPlayerStats(games) {
 // ─── Store (React Context) ────────────────────────────────────────────────────
 function reducer(state, action) {
   switch (action.type) {
-    case 'CREATE': return { ...state, games: [{ id: action.id, name: action.name.trim() || 'Poker Night', date: Date.now(), players: [], invitees: [], isActive: true, endedAt: null }, ...state.games] };
+    case 'CREATE': return { ...state, games: [{ id: action.id, name: action.name.trim() || 'Poker Night', date: Date.now(), players: [], tableAmount: null, isActive: true, endedAt: null }, ...state.games] };
     case 'DELETE': return { ...state, games: state.games.filter(g => g.id !== action.id) };
     case 'END': return { ...state, games: state.games.map(g => g.id === action.id ? { ...g, isActive: false, endedAt: Date.now() } : g) };
+    case 'SET_TABLE': return { ...state, games: state.games.map(g => g.id === action.id ? { ...g, tableAmount: action.amount } : g) };
+    case 'CLR_TABLE': return { ...state, games: state.games.map(g => g.id === action.id ? { ...g, tableAmount: null } : g) };
     case 'ADD_PLAYER': {
       const p = { id: action.pid, name: action.name.trim(), buyIns: [], cashOut: null };
       return { ...state, games: state.games.map(g => g.id === action.id ? { ...g, players: [...g.players, p] } : g) };
@@ -114,34 +159,16 @@ function reducer(state, action) {
       const { [action.key]: _removed, ...rest } = state.settled;
       return { ...state, settled: rest };
     }
-    case 'ENTER_HOST': {
-      if (state.hostPin === null) return { ...state, isHost: true, hostPin: action.pin };
-      return state.hostPin === action.pin ? { ...state, isHost: true } : state;
-    }
-    case 'EXIT_HOST': return { ...state, isHost: false };
-    case 'RSVP_ADD': return {
-      ...state, games: state.games.map(g => g.id === action.gid
-        ? { ...g, invitees: [...(g.invitees || []), { id: action.iid, name: action.name, phone: action.phone || '', status: 'invited' }] }
-        : g),
-    };
-    case 'RSVP_UPDATE': return {
-      ...state, games: state.games.map(g => g.id === action.gid
-        ? { ...g, invitees: (g.invitees || []).map(i => i.id === action.iid ? { ...i, status: action.status } : i) }
-        : g),
-    };
-    case 'RSVP_DEL': return {
-      ...state, games: state.games.map(g => g.id === action.gid
-        ? { ...g, invitees: (g.invitees || []).filter(i => i.id !== action.iid) }
-        : g),
-    };
-    case 'HYDRATE': return { ...state, ...action.payload, isHost: false };
+    case 'LOCK':   return { ...state, isLocked: true };
+    case 'UNLOCK': return { ...state, isLocked: false };
+    case 'HYDRATE': return { ...state, ...action.payload, isLocked: action.payload.isLocked ?? false };
     default: return state;
   }
 }
 const Ctx = createContext(null);
 const STORAGE_KEY = '@poker_tracker_v1';
 function StoreProvider({ children }) {
-  const [state, dispatch] = useReducer(reducer, { games: [], roster: [], settled: {}, isHost: false, hostPin: null });
+  const [state, dispatch] = useReducer(reducer, { games: [], roster: [], settled: {}, isLocked: false });
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
@@ -161,7 +188,7 @@ function StoreProvider({ children }) {
       games: state.games,
       roster: state.roster,
       settled: state.settled,
-      hostPin: state.hostPin,
+      isLocked: state.isLocked,
     })).catch(() => {});
   }, [state, hydrated]);
 
@@ -171,8 +198,7 @@ function StoreProvider({ children }) {
     games: state.games,
     roster: state.roster,
     settled: state.settled,
-    isHost: state.isHost,
-    hostPin: state.hostPin,
+    isLocked: state.isLocked,
     createGame: name => { const id = uid(); dispatch({ type: 'CREATE', id, name }); return id; },
     deleteGame: id => dispatch({ type: 'DELETE', id }),
     endGame: id => dispatch({ type: 'END', id }),
@@ -186,11 +212,10 @@ function StoreProvider({ children }) {
     setRosterPhone: (rid, phone) => dispatch({ type: 'ROSTER_SET_PHONE', rid, phone }),
     settleDebt: key => dispatch({ type: 'SETTLE', key }),
     unsettleDebt: key => dispatch({ type: 'UNSETTLE', key }),
-    enterHostMode: pin => { dispatch({ type: 'ENTER_HOST', pin }); return state.hostPin === null || state.hostPin === pin; },
-    exitHostMode: () => dispatch({ type: 'EXIT_HOST' }),
-    addRsvp: (gid, name, phone) => dispatch({ type: 'RSVP_ADD', gid, name, phone, iid: uid() }),
-    updateRsvp: (gid, iid, status) => dispatch({ type: 'RSVP_UPDATE', gid, iid, status }),
-    removeRsvp: (gid, iid) => dispatch({ type: 'RSVP_DEL', gid, iid }),
+    lockApp: () => dispatch({ type: 'LOCK' }),
+    unlockApp: () => dispatch({ type: 'UNLOCK' }),
+    setTableAmount: (id, amount) => dispatch({ type: 'SET_TABLE', id, amount }),
+    clearTableAmount: id => dispatch({ type: 'CLR_TABLE', id }),
   };
   return React.createElement(Ctx.Provider, { value: store }, children);
 }
@@ -517,83 +542,6 @@ const co = StyleSheet.create({
 });
 
 // ─── Host PIN Modal ───────────────────────────────────────────────────────────
-function HostPinModal({ visible, hasPin, onClose, onSuccess }) {
-  const [pin, setPin] = useState('');
-  const [confirmPin, setConfirmPin] = useState('');
-  const [step, setStep] = useState('enter');
-  const [error, setError] = useState('');
-
-  React.useEffect(() => {
-    if (visible) { setPin(''); setConfirmPin(''); setError(''); setStep(hasPin ? 'enter' : 'set'); }
-  }, [visible, hasPin]);
-
-  const dots = (n, hasError) => (
-    <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 14, marginBottom: 8 }}>
-      {[0, 1, 2, 3].map(i => (
-        <View key={i} style={{ width: 18, height: 18, borderRadius: 9, borderWidth: 2,
-          backgroundColor: hasError ? C.red : n > i ? C.blue : 'transparent',
-          borderColor: hasError ? C.red : n > i ? C.blue : C.border }} />
-      ))}
-    </View>
-  );
-
-  const handleNext = () => {
-    if (pin.length < 4) return;
-    if (hasPin) {
-      const ok = onSuccess(pin);
-      if (ok) { setPin(''); setError(''); onClose(); }
-      else { setError('Incorrect PIN — try again'); setPin(''); }
-      return;
-    }
-    if (step === 'set') { setConfirmPin(pin); setPin(''); setError(''); setStep('confirm'); return; }
-    if (pin !== confirmPin) {
-      setError('PINs do not match — try again');
-      setPin(''); setConfirmPin(''); setStep('set');
-      return;
-    }
-    onSuccess(pin);
-    setPin('');
-    onClose();
-  };
-
-  return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <Pressable style={ms.overlay} onPress={onClose}>
-        <Pressable style={ms.box} onPress={() => {}}>
-          <Text style={ms.title}>{hasPin ? '🔐 Enter Host PIN' : '🔐 Set Host PIN'}</Text>
-          <Text style={[ms.sub, { marginBottom: 20 }]}>
-            {!hasPin && step === 'set' ? 'Create a 4-digit PIN to protect host mode'
-              : !hasPin && step === 'confirm' ? 'Confirm your PIN'
-              : 'Enter your PIN to unlock host mode'}
-          </Text>
-          {dots(pin.length, !!error)}
-          {error ? (
-            <Text style={{ color: C.red, fontSize: 13, fontWeight: '600', textAlign: 'center', marginBottom: 12 }}>
-              {error}
-            </Text>
-          ) : <View style={{ height: 24 }} />}
-          <TextInput style={[ms.input, { textAlign: 'center', fontSize: 20, letterSpacing: 12 }, error && { borderColor: C.red }]}
-            placeholder="••••" placeholderTextColor={C.textMuted}
-            value={pin} onChangeText={t => { setError(''); setPin(t.replace(/\D/g, '').slice(0, 4)); }}
-            keyboardType="number-pad" secureTextEntry autoFocus maxLength={4}
-            onSubmitEditing={handleNext} />
-          <View style={ms.row}>
-            <TouchableOpacity style={[ms.btn, ms.cancel]} onPress={onClose}>
-              <Text style={ms.cancelTxt}>Cancel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[ms.btn, ms.confirm, pin.length < 4 && ms.disabled]}
-              onPress={handleNext} disabled={pin.length < 4}>
-              <Text style={ms.confirmTxt}>
-                {!hasPin && step === 'set' ? 'Next' : !hasPin ? 'Set PIN' : 'Unlock'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </Pressable>
-      </Pressable>
-    </Modal>
-  );
-}
-
 const ms = StyleSheet.create({
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.75)', justifyContent: 'center', alignItems: 'center', padding: 24 },
   box: { backgroundColor: C.surfaceAlt, borderRadius: 20, padding: 24, width: '100%', borderWidth: 1, borderColor: C.border },
@@ -1133,138 +1081,68 @@ const dbt = StyleSheet.create({
 });
 
 // ─── RSVP Section ─────────────────────────────────────────────────────────────
-const STATUS_COLOR = { attending: '#30d158', invited: '#ffd60a', declined: '#ff453a' };
-const STATUS_LABEL = { attending: 'Going ✓', invited: 'Invited', declined: 'Not Going' };
-const NEXT_STATUS  = { attending: 'declined', invited: 'attending', declined: 'invited' };
 
-function RsvpSection({ game, isHost, roster, onAdd, onUpdate, onRemove, onShareInvite }) {
-  const [showAdd, setShowAdd] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newPhone, setNewPhone] = useState('');
-
-  const invitees = game.invitees || [];
-  const going    = invitees.filter(i => i.status === 'attending').length;
-  const invited  = invitees.filter(i => i.status === 'invited').length;
-  const declined = invitees.filter(i => i.status === 'declined').length;
-  const availRoster = roster.filter(r => !invitees.some(i => i.name === r.name));
-
-  const submitAdd = (name, phone = '') => {
-    if (!name.trim()) return;
-    onAdd(name.trim(), phone.trim());
-    setNewName(''); setNewPhone(''); setShowAdd(false);
-  };
+// ─── History Modal ────────────────────────────────────────────────────────────
+function HistoryModal({ visible, games, onNavigate, onDelete, onClose }) {
+  const past = games.filter(g => !g.isActive);
+  const { height: screenH } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const listH = Math.max(120, screenH * 0.75 - insets.bottom - 140);
 
   return (
-    <View style={{ marginBottom: 20 }}>
-      {/* Section title + status pills */}
-      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 6 }}>
-        <Text style={gs.secTitle}>Attendance</Text>
-        {going > 0    && <View style={rsvp.pill}><Text style={[rsvp.pillTxt, { color: STATUS_COLOR.attending }]}>{going} Going</Text></View>}
-        {invited > 0  && <View style={rsvp.pill}><Text style={[rsvp.pillTxt, { color: STATUS_COLOR.invited }]}>{invited} Invited</Text></View>}
-        {declined > 0 && <View style={rsvp.pill}><Text style={[rsvp.pillTxt, { color: STATUS_COLOR.declined }]}>{declined} Out</Text></View>}
-      </View>
-
-      {invitees.length === 0 && (
-        <View style={[gs.emptyBox, { marginBottom: 10 }]}>
-          <Text style={{ color: C.textMuted, fontSize: 14 }}>
-            {isHost ? 'No invitees yet — use + Invite below' : 'No invites sent yet'}
-          </Text>
-        </View>
-      )}
-
-      {invitees.map(inv => {
-        const col = STATUS_COLOR[inv.status];
-        const lbl = STATUS_LABEL[inv.status];
-        return (
-          <View key={inv.id} style={rsvp.row}>
-            <View style={[rsvp.dot, { backgroundColor: col }]} />
-            <View style={{ flex: 1 }}>
-              <Text style={rsvp.name}>{inv.name}</Text>
-              {!!inv.phone && <Text style={rsvp.phone}>{inv.phone}</Text>}
-            </View>
-            <TouchableOpacity style={[rsvp.chip, { borderColor: col }]}
-              onPress={() => onUpdate(inv.id, NEXT_STATUS[inv.status])} activeOpacity={0.7}>
-              <Text style={[rsvp.chipTxt, { color: col }]}>{lbl}</Text>
-            </TouchableOpacity>
-            {isHost && (
-              <TouchableOpacity onPress={() => onRemove(inv.id)}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} style={{ padding: 6, marginLeft: 4 }}>
-                <Text style={{ color: C.textMuted, fontSize: 13 }}>✕</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        );
-      })}
-
-      {isHost && (
-        showAdd ? (
-          <View style={rsvp.addBox}>
-            {availRoster.length > 0 && (
-              <>
-                <Text style={[apm.sectionLabel, { marginBottom: 8 }]}>From Roster</Text>
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
-                  {availRoster.map(r => (
-                    <TouchableOpacity key={r.id} style={apm.chip} onPress={() => submitAdd(r.name)} activeOpacity={0.7}>
-                      <Text style={apm.chipTxt}>{r.name}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </>
-            )}
-            <TextInput style={ms.input} placeholder="Name" placeholderTextColor={C.textMuted}
-              value={newName} onChangeText={setNewName} maxLength={30} />
-            <TextInput style={[ms.input, { marginBottom: 12 }]} placeholder="Phone number (optional)"
-              placeholderTextColor={C.textMuted} value={newPhone} onChangeText={setNewPhone}
-              keyboardType="phone-pad" maxLength={20} />
-            <View style={ms.row}>
-              <TouchableOpacity style={[ms.btn, ms.cancel]} onPress={() => { setShowAdd(false); setNewName(''); setNewPhone(''); }}>
-                <Text style={ms.cancelTxt}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[ms.btn, ms.confirm, !newName.trim() && ms.disabled]}
-                onPress={() => submitAdd(newName, newPhone)} disabled={!newName.trim()}>
-                <Text style={ms.confirmTxt}>Invite</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        ) : (
-          <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
-            <TouchableOpacity style={[gs.addBtn, { flex: 1, marginBottom: 0 }]} onPress={() => setShowAdd(true)} activeOpacity={0.7}>
-              <Text style={{ color: C.blue, fontSize: 14, fontWeight: '700' }}>+ Invite</Text>
-            </TouchableOpacity>
-            {invitees.length > 0 && (
-              <TouchableOpacity style={[gs.addBtn, { flex: 1, marginBottom: 0, borderColor: '#1a3520' }]}
-                onPress={onShareInvite} activeOpacity={0.7}>
-                <Text style={{ color: C.green, fontSize: 14, fontWeight: '700' }}>📤 Share Invite</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        )
-      )}
-    </View>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={dss.overlay} onPress={onClose}>
+        <Pressable style={dss.sheet} onPress={() => {}}>
+          <Text style={dss.title}>📋  Game History</Text>
+          <Text style={dss.sub}>{past.length} past game{past.length !== 1 ? 's' : ''}</Text>
+          <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: listH }} nestedScrollEnabled>
+            {past.length === 0 ? (
+              <View style={{ alignItems: 'center', paddingVertical: 32 }}>
+                <Text style={{ fontSize: 36, marginBottom: 8 }}>🃏</Text>
+                <Text style={{ color: C.textSecondary, fontSize: 16, fontWeight: '600' }}>No past games yet</Text>
+                <Text style={{ color: C.textMuted, fontSize: 13, marginTop: 6, textAlign: 'center' }}>
+                  End an active game to see it here
+                </Text>
+              </View>
+            ) : past.map(g => {
+              const pot = g.players.reduce((s, p) => s + totalBuyIn(p), 0);
+              const date = new Date(g.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+              return (
+                <TouchableOpacity key={g.id} style={hm.row} onPress={() => { onNavigate(g.id); onClose(); }} activeOpacity={0.75}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={hm.name} numberOfLines={1}>{g.name}</Text>
+                    <Text style={hm.meta}>{date}  ·  {g.players.length} player{g.players.length !== 1 ? 's' : ''}{pot > 0 ? `  ·  Pot: ${fmt(pot)}` : ''}</Text>
+                  </View>
+                  <TouchableOpacity onPress={() => onDelete(g.id, g.name)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                    <Text style={{ color: C.textMuted, fontSize: 16 }}>✕</Text>
+                  </TouchableOpacity>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+          <TouchableOpacity style={[ms.btn, { backgroundColor: C.blue, marginTop: 14 }]} onPress={onClose}>
+            <Text style={ms.confirmTxt}>Done</Text>
+          </TouchableOpacity>
+        </Pressable>
+      </Pressable>
+    </Modal>
   );
 }
-
-const rsvp = StyleSheet.create({
-  pill: { backgroundColor: C.surfaceRaised, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 2, borderWidth: 1, borderColor: C.border },
-  pillTxt: { fontSize: 11, fontWeight: '700' },
-  row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingHorizontal: 12, backgroundColor: C.surface, borderRadius: 12, marginBottom: 8, borderWidth: 1, borderColor: C.border },
-  dot: { width: 8, height: 8, borderRadius: 4, marginRight: 10, flexShrink: 0 },
-  name: { color: C.text, fontSize: 15, fontWeight: '600' },
-  phone: { color: C.textMuted, fontSize: 11, marginTop: 1 },
-  chip: { borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1 },
-  chipTxt: { fontSize: 12, fontWeight: '700' },
-  addBox: { backgroundColor: C.surfaceAlt, borderRadius: 14, padding: 14, marginTop: 8, borderWidth: 1, borderColor: C.border },
+const hm = StyleSheet.create({
+  row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: C.border },
+  name: { color: C.text, fontSize: 16, fontWeight: '700', marginBottom: 3 },
+  meta: { color: C.textMuted, fontSize: 13 },
 });
 
 // ─── Home Screen ──────────────────────────────────────────────────────────────
 function HomeScreen({ onNavigate }) {
-  const { games, roster, settled, isHost, hostPin, createGame, deleteGame,
-    addToRoster, removeFromRoster, setRosterPhone, settleDebt, unsettleDebt, enterHostMode, exitHostMode } = useStore();
+  const { games, roster, settled, isLocked, createGame, deleteGame,
+    addToRoster, removeFromRoster, setRosterPhone, settleDebt, unsettleDebt, lockApp, unlockApp } = useStore();
   const [showModal, setShowModal] = useState(false);
   const [showRoster, setShowRoster] = useState(false);
   const [showStats, setShowStats] = useState(false);
   const [showDebts, setShowDebts] = useState(false);
-  const [showHostPin, setShowHostPin] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [name, setName] = useState('');
 
   const handleCreate = () => { const id = createGame(name); setName(''); setShowModal(false); onNavigate(id); };
@@ -1274,10 +1152,6 @@ function HomeScreen({ onNavigate }) {
   ]);
 
   const active = games.filter(g => g.isActive);
-  const past = games.filter(g => !g.isActive);
-  const sections = [];
-  if (active.length) { sections.push({ key: 'h1', header: 'Active' }); active.forEach(g => sections.push({ key: g.id, game: g })); }
-  if (past.length) { sections.push({ key: 'h2', header: 'Past Games' }); past.forEach(g => sections.push({ key: g.id, game: g })); }
 
   const debtCount = games.filter(g => !g.isActive)
     .flatMap(g => calcSettlements(g.players).map(s => debtKey(g.id, s.from, s.to)))
@@ -1287,35 +1161,36 @@ function HomeScreen({ onNavigate }) {
     <SafeAreaView style={hs.root}>
       {/* ── Header ── */}
       <View style={hs.header}>
-        {/* Ace of Spades */}
         <View style={hs.aceCard}>
           <Text style={hs.aceRank}>A</Text>
           <Text style={hs.aceSuit}>♠</Text>
         </View>
-
         <Text style={hs.title}>Home Poker Tracker</Text>
-
-        {/* Ace of Hearts */}
         <View style={hs.aceCard}>
           <Text style={hs.aceRank}>A</Text>
           <Text style={[hs.aceSuit, { color: '#e53935' }]}>♥</Text>
         </View>
       </View>
 
-      {/* ── Game list ── */}
-      {games.length === 0 ? (
+      {/* ── Active games list ── */}
+      {isLocked ? (
+        /* Locked overlay on game list */
+        <View style={hs.empty}>
+          <Text style={{ fontSize: 56, marginBottom: 14 }}>🔒</Text>
+          <Text style={hs.emptyTitle}>App is Locked</Text>
+          <Text style={hs.emptySub}>Tap the Lock tab below to unlock and access your games</Text>
+        </View>
+      ) : active.length === 0 ? (
         <View style={hs.empty}>
           <Text style={{ fontSize: 64, marginBottom: 16 }}>♠️</Text>
-          <Text style={hs.emptyTitle}>No games yet</Text>
-          <Text style={hs.emptySub}>Become the host and start your first game</Text>
+          <Text style={hs.emptyTitle}>No active games</Text>
+          <Text style={hs.emptySub}>Start a new game or check History for past sessions</Text>
         </View>
       ) : (
-        <FlatList data={sections} keyExtractor={i => i.key}
+        <FlatList data={active} keyExtractor={g => g.id}
           style={{ flex: 1 }}
           contentContainerStyle={{ padding: 16, paddingBottom: 12 }}
-          renderItem={({ item }) => {
-            if (item.header) return <Text style={hs.secHeader}>{item.header}</Text>;
-            const g = item.game;
+          renderItem={({ item: g }) => {
             const pot = g.players.reduce((s, p) => s + totalBuyIn(p), 0);
             const date = new Date(g.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
             return (
@@ -1323,7 +1198,7 @@ function HomeScreen({ onNavigate }) {
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                     <Text style={hs.cardName} numberOfLines={1}>{g.name}</Text>
-                    {g.isActive && <View style={hs.badge}><Text style={hs.badgeTxt}>LIVE</Text></View>}
+                    <View style={hs.badge}><Text style={hs.badgeTxt}>LIVE</Text></View>
                   </View>
                   <Text style={hs.cardDate}>{date}</Text>
                   <Text style={hs.cardMeta}>{g.players.length} player{g.players.length !== 1 ? 's' : ''}{pot > 0 ? `  ·  Pot: ${fmt(pot)}` : ''}</Text>
@@ -1339,48 +1214,89 @@ function HomeScreen({ onNavigate }) {
 
       {/* ── Bottom dock ── */}
       <View style={hs.dock}>
-        {/* New Game row */}
+        {/* New Game button */}
         <TouchableOpacity
-          style={[hs.newGameBtn, !isHost && hs.newGameBtnLocked]}
-          onPress={() => isHost ? setShowModal(true) : setShowHostPin(true)}
+          style={[hs.newGameBtn, isLocked && hs.newGameBtnLocked]}
+          onPress={() => isLocked
+            ? Alert.alert('App is Locked', 'Tap the Lock tab to unlock the app first.')
+            : setShowModal(true)
+          }
           activeOpacity={0.85}>
-          <Text style={[hs.newGameIcon, !isHost && { color: C.textMuted }]}>
-            {isHost ? '＋' : '🔒'}
+          <Text style={[hs.newGameIcon, isLocked && { color: C.textMuted }]}>
+            {isLocked ? '🔒' : '＋'}
           </Text>
-          <Text style={[hs.newGameTxt, !isHost && { color: C.textMuted }]}>
-            {isHost ? 'New Game' : 'New Game  (host only)'}
+          <Text style={[hs.newGameTxt, isLocked && { color: C.textMuted }]}>
+            {isLocked ? 'New Game  (locked)' : 'New Game'}
           </Text>
         </TouchableOpacity>
 
-        {/* Tab bar */}
+        {/* Lock toggle row */}
+        <View style={hs.lockRow}>
+          <Text style={hs.lockIcon}>{isLocked ? '🔒' : '🔓'}</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={[hs.lockLabel, isLocked && { color: C.red }]}>
+              {isLocked ? 'App Locked' : 'App Unlocked'}
+            </Text>
+            <Text style={hs.lockSub}>
+              {isLocked ? 'Tap to unlock all features' : 'Tap to lock editing'}
+            </Text>
+          </View>
+          <Switch
+            value={isLocked}
+            onValueChange={v => v
+              ? Alert.alert('Lock App', 'Lock the app to prevent any changes?',
+                  [{ text: 'Cancel', style: 'cancel' }, { text: 'Lock', onPress: lockApp }])
+              : unlockApp()
+            }
+            trackColor={{ false: C.surfaceRaised, true: '#5c1a1a' }}
+            thumbColor={isLocked ? C.red : C.green}
+            ios_backgroundColor={C.surfaceRaised}
+          />
+        </View>
+
+        {/* Tab bar — 4 items, no Lock tab */}
         <View style={hs.tabBar}>
-          <TouchableOpacity style={hs.tabItem} onPress={() => setShowRoster(true)} activeOpacity={0.7}>
-            <Text style={hs.tabIcon}>👥</Text>
-            <Text style={hs.tabLabel}>Roster</Text>
+          <TouchableOpacity
+            style={[hs.tabItem, isLocked && hs.tabItemDisabled]}
+            onPress={() => isLocked
+              ? Alert.alert('App is Locked', 'Unlock the app to access the Roster.')
+              : setShowRoster(true)}
+            activeOpacity={isLocked ? 1 : 0.7}>
+            <Text style={[hs.tabIcon, isLocked && { opacity: 0.35 }]}>👥</Text>
+            <Text style={[hs.tabLabel, isLocked && { opacity: 0.35 }]}>Roster</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={hs.tabItem} onPress={() => setShowStats(true)} activeOpacity={0.7}>
-            <Text style={hs.tabIcon}>📊</Text>
-            <Text style={hs.tabLabel}>Stats</Text>
+          <TouchableOpacity
+            style={[hs.tabItem, isLocked && hs.tabItemDisabled]}
+            onPress={() => isLocked
+              ? Alert.alert('App is Locked', 'Unlock the app to view Stats.')
+              : setShowStats(true)}
+            activeOpacity={isLocked ? 1 : 0.7}>
+            <Text style={[hs.tabIcon, isLocked && { opacity: 0.35 }]}>📊</Text>
+            <Text style={[hs.tabLabel, isLocked && { opacity: 0.35 }]}>Stats</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={hs.tabItem} onPress={() => setShowDebts(true)} activeOpacity={0.7}>
-            <Text style={hs.tabIcon}>💰</Text>
-            <Text style={hs.tabLabel}>Settle Up</Text>
-            {debtCount > 0 && (
+          <TouchableOpacity
+            style={[hs.tabItem, isLocked && hs.tabItemDisabled]}
+            onPress={() => isLocked
+              ? Alert.alert('App is Locked', 'Unlock the app to view Settle Up.')
+              : setShowDebts(true)}
+            activeOpacity={isLocked ? 1 : 0.7}>
+            <Text style={[hs.tabIcon, isLocked && { opacity: 0.35 }]}>💰</Text>
+            <Text style={[hs.tabLabel, isLocked && { opacity: 0.35 }]}>Settle Up</Text>
+            {debtCount > 0 && !isLocked && (
               <View style={hs.debtBadge}><Text style={hs.debtBadgeTxt}>{debtCount}</Text></View>
             )}
           </TouchableOpacity>
 
-          <TouchableOpacity
-            style={[hs.tabItem, isHost && hs.tabItemActive]}
-            onPress={() => isHost ? exitHostMode() : setShowHostPin(true)}
-            activeOpacity={0.7}>
-            <Text style={hs.tabIcon}>{isHost ? '👑' : '🔒'}</Text>
-            <Text style={[hs.tabLabel, isHost && hs.tabLabelActive]}>Host</Text>
+          <TouchableOpacity style={hs.tabItem} onPress={() => setShowHistory(true)} activeOpacity={0.7}>
+            <Text style={hs.tabIcon}>📋</Text>
+            <Text style={hs.tabLabel}>History</Text>
           </TouchableOpacity>
         </View>
       </View>
+
+      {/* ── Modals ── */}
       <Modal visible={showModal} transparent animationType="fade">
         <Pressable style={ms.overlay} onPress={() => setShowModal(false)}>
           <Pressable style={ms.box} onPress={() => {}}>
@@ -1406,9 +1322,9 @@ function HomeScreen({ onNavigate }) {
       <DebtsModal visible={showDebts} games={games} settled={settled}
         onClose={() => setShowDebts(false)}
         onSettle={settleDebt} onUnsettle={unsettleDebt} />
-      <HostPinModal visible={showHostPin} hasPin={!!hostPin}
-        onClose={() => setShowHostPin(false)}
-        onSuccess={pin => enterHostMode(pin)} />
+      <HistoryModal visible={showHistory} games={games}
+        onNavigate={onNavigate} onDelete={handleDelete}
+        onClose={() => setShowHistory(false)} />
     </SafeAreaView>
   );
 }
@@ -1445,7 +1361,7 @@ const hs = StyleSheet.create({
 
   // New game button
   newGameBtn: {
-    marginHorizontal: 16, marginTop: 12, marginBottom: 10,
+    marginHorizontal: 16, marginTop: 12, marginBottom: 8,
     backgroundColor: C.green, borderRadius: 14,
     paddingVertical: 14, flexDirection: 'row',
     alignItems: 'center', justifyContent: 'center', gap: 8,
@@ -1457,16 +1373,27 @@ const hs = StyleSheet.create({
   newGameIcon: { color: '#000', fontSize: 20, fontWeight: '900', lineHeight: 22 },
   newGameTxt: { color: '#000', fontSize: 16, fontWeight: '800' },
 
+  // Lock toggle row
+  lockRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    marginHorizontal: 16, marginBottom: 8,
+    backgroundColor: C.surface, borderRadius: 14,
+    paddingVertical: 10, paddingHorizontal: 14,
+    borderWidth: 1, borderColor: C.border,
+  },
+  lockIcon: { fontSize: 20 },
+  lockLabel: { color: C.text, fontSize: 13, fontWeight: '700' },
+  lockSub: { color: C.textMuted, fontSize: 11, marginTop: 1 },
+
   // Tab bar
   tabBar: {
     flexDirection: 'row', borderTopWidth: 1, borderTopColor: C.border,
     paddingTop: 8, paddingBottom: 6, paddingHorizontal: 4,
   },
   tabItem: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 4, borderRadius: 10, position: 'relative' },
-  tabItemActive: { backgroundColor: '#1a1500' },
-  tabIcon: { fontSize: 22, marginBottom: 3 },
-  tabLabel: { color: C.textMuted, fontSize: 11, fontWeight: '600' },
-  tabLabelActive: { color: C.gold },
+  tabItemDisabled: { opacity: 0.5 },
+  tabIcon: { fontSize: 20, marginBottom: 3 },
+  tabLabel: { color: C.textMuted, fontSize: 10, fontWeight: '600' },
 
   // Debt badge on Settle Up tab
   debtBadge: {
@@ -1480,27 +1407,30 @@ const hs = StyleSheet.create({
 
 // ─── Game Screen ──────────────────────────────────────────────────────────────
 function GameScreen({ id, onBack }) {
-  const { games, roster, isHost, endGame, addPlayer, removePlayer, addBuyIn, setCashOut, clearCashOut, addToRoster, addRsvp, updateRsvp, removeRsvp } = useStore();
+  const { games, roster, isLocked, endGame, addPlayer, removePlayer, addBuyIn, setCashOut, clearCashOut,
+    addToRoster, setTableAmount, clearTableAmount } = useStore();
   const game = games.find(g => g.id === id);
   const [modal, setModal] = useState(null);
+  const canEdit = !isLocked;
 
   const handleEnd = useCallback(() => {
     if (!game) return;
     const missing = game.players.filter(p => p.cashOut === null && totalBuyIn(p) > 0);
     const pot_ = game.players.reduce((s, p) => s + totalBuyIn(p), 0);
-    const totalOut_ = game.players.reduce((s, p) => s + (p.cashOut ?? 0), 0);
+    const totalOut_ = game.players.reduce((s, p) => s + (p.cashOut ?? 0), 0) + (game.tableAmount ?? 0);
     const bal_ = Math.round((totalOut_ - pot_) * 100) / 100;
     const doEnd = () => endGame(game.id);
 
     let msg = '';
     if (missing.length) msg += `${missing.map(p => p.name).join(', ')} haven't cashed out yet.\n\n`;
-    if (bal_ !== 0) {
+    if (game.tableAmount === null) msg += '⚠️ Table amount has not been set.\n\n';
+    if (bal_ !== 0 && game.tableAmount !== null) {
       const diff = fmt(Math.abs(bal_));
       msg += bal_ > 0
-        ? `⚠️ Cash out exceeds pot by ${diff} — please review player amounts before ending.\n\n`
-        : `⚠️ Cash out is ${diff} short of the pot — please review player amounts before ending.\n\n`;
+        ? `⚠️ Cash out exceeds pot by ${diff} — please review amounts.\n\n`
+        : `⚠️ Cash out is ${diff} short of the pot — please review amounts.\n\n`;
     }
-    msg += 'End the game anyway?';
+    msg += 'End the game?';
 
     Alert.alert('End Game', msg.trim(), [
       { text: 'Cancel', style: 'cancel' },
@@ -1523,21 +1453,6 @@ function GameScreen({ id, onBack }) {
     } catch {}
   }, [roster, game]);
 
-  const handleShareInvite = useCallback(async () => {
-    if (!game) return;
-    const invitees = game.invitees || [];
-    const date = new Date(game.date).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-    const lines = [`🃏 You're invited to ${game.name}!`, `📅 ${date}`, ''];
-    const going    = invitees.filter(i => i.status === 'attending');
-    const invited  = invitees.filter(i => i.status === 'invited');
-    const declined = invitees.filter(i => i.status === 'declined');
-    if (going.length)    { lines.push('✅ Going:');    going.forEach(i    => lines.push(`  ${i.name}${i.phone ? ` (${i.phone})` : ''}`)); lines.push(''); }
-    if (invited.length)  { lines.push('⏳ Invited:');  invited.forEach(i  => lines.push(`  ${i.name}${i.phone ? ` (${i.phone})` : ''}`)); lines.push(''); }
-    if (declined.length) { lines.push('❌ Not Going:'); declined.forEach(i => lines.push(`  ${i.name}`)); lines.push(''); }
-    lines.push('Reply with your RSVP!');
-    try { await Share.share({ message: lines.join('\n') }); } catch {}
-  }, [game]);
-
   if (!game) return (
     <SafeAreaView style={gs.root}>
       <View style={gs.header}>
@@ -1548,11 +1463,14 @@ function GameScreen({ id, onBack }) {
 
   const settlements = game.isActive ? [] : calcSettlements(game.players);
   const pot = game.players.reduce((s, p) => s + totalBuyIn(p), 0);
-  const totalCashOut = game.players.reduce((s, p) => s + (p.cashOut ?? 0), 0);
+  const tableAmt = game.tableAmount ?? 0;
+  const totalCashOut = game.players.reduce((s, p) => s + (p.cashOut ?? 0), 0) + tableAmt;
   const cashedOut = game.players.filter(p => p.cashOut !== null).length;
   const allCashedOut = game.players.length > 0 && cashedOut === game.players.length;
   const balance = Math.round((totalCashOut - pot) * 100) / 100;
-  const hasImbalance = allCashedOut && balance !== 0;
+  const hasImbalance = allCashedOut && (game.tableAmount !== null) && balance !== 0;
+  // Players still in the game (no cash out yet)
+  const activePlayers = game.players.filter(p => p.cashOut === null);
 
   return (
     <SafeAreaView style={gs.root}>
@@ -1581,7 +1499,7 @@ function GameScreen({ id, onBack }) {
             { label: 'Cashed Out', value: `${cashedOut}/${game.players.length}` },
             {
               label: 'Balance',
-              value: !allCashedOut ? '—' : balance === 0 ? '✓' : (balance > 0 ? '+' : '') + fmt(balance),
+              value: (game.tableAmount === null && !allCashedOut) ? '—' : balance === 0 ? '✓' : (balance > 0 ? '+' : '') + fmt(balance),
               balOk: allCashedOut && balance === 0,
               balErr: hasImbalance,
             },
@@ -1622,20 +1540,11 @@ function GameScreen({ id, onBack }) {
             </Text>
             <Text style={gs.imbalanceSub}>
               {balance > 0
-                ? 'Total cashed out exceeds the pot. Reduce a player\'s cash-out amount to fix this.'
-                : 'Total cashed out is less than the pot. Increase a player\'s cash-out amount to fix this.'}
+                ? 'Total cashed out exceeds the pot. Use "Adjust Cash Out" on any player\'s row to correct the amount.'
+                : 'Total cashed out is less than the pot. Use "Adjust Cash Out" on any player\'s row to correct the amount.'}
             </Text>
           </View>
         )}
-
-        {/* RSVP / Attendance */}
-        <RsvpSection
-          game={game} isHost={isHost} roster={roster}
-          onAdd={(name, phone) => addRsvp(game.id, name, phone)}
-          onUpdate={(iid, status) => updateRsvp(game.id, iid, status)}
-          onRemove={iid => removeRsvp(game.id, iid)}
-          onShareInvite={handleShareInvite}
-        />
 
         {/* Players */}
         <Text style={gs.secTitle}>Players</Text>
@@ -1648,12 +1557,29 @@ function GameScreen({ id, onBack }) {
           const bi = totalBuyIn(player), net = playerNet(player), hasOut = player.cashOut !== null;
           const netCol = net > 0 ? C.green : net < 0 ? C.red : C.textMuted;
           const initials = player.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+          const noBuyIn = bi === 0;
+          // Disable buy-in if: locked, or player cashed out, or this is the last active player
+          const isLastActive = activePlayers.length === 1 && activePlayers[0].id === player.id;
+          const buyInDisabled = !canEdit || hasOut || isLastActive;
+          const cashOutDisabled = !canEdit || hasOut || noBuyIn;
           return (
-            <View key={player.id} style={gs.playerCard}>
+            <View key={player.id} style={[gs.playerCard, hasOut && gs.playerCardDone]}>
               <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
-                <View style={gs.avatar}><Text style={gs.avatarTxt}>{initials}</Text></View>
+                <View style={[gs.avatar, hasOut && { backgroundColor: C.surfaceRaised }]}>
+                  <Text style={[gs.avatarTxt, hasOut && { color: C.textMuted }]}>{initials}</Text>
+                </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={gs.playerName}>{player.name}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Text style={[gs.playerName, hasOut && { color: C.textSecondary }]}>{player.name}</Text>
+                    {hasOut && <View style={{ backgroundColor: C.greenDim, borderRadius: 5, paddingHorizontal: 6, paddingVertical: 1 }}>
+                      <Text style={{ color: C.green, fontSize: 10, fontWeight: '800' }}>CASHED OUT</Text>
+                    </View>}
+                    {isLastActive && game.isActive && (
+                      <View style={{ backgroundColor: '#1a1500', borderRadius: 5, paddingHorizontal: 6, paddingVertical: 1 }}>
+                        <Text style={{ color: C.gold, fontSize: 10, fontWeight: '800' }}>LAST PLAYER</Text>
+                      </View>
+                    )}
+                  </View>
                   <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                     {[['In', bi > 0 ? fmt(bi) : '—', null], ['Out', hasOut ? fmt(player.cashOut) : '—', null], ['Net', (bi > 0 || hasOut) ? fmtNet(net) : '—', netCol]].map(([lbl, val, col], idx) => (
                       <React.Fragment key={lbl}>
@@ -1666,7 +1592,7 @@ function GameScreen({ id, onBack }) {
                     ))}
                   </View>
                 </View>
-                {game.isActive && isHost && (
+                {game.isActive && canEdit && !hasOut && (
                   <TouchableOpacity onPress={() => Alert.alert('Remove', `Remove ${player.name}?`, [{ text: 'Cancel', style: 'cancel' }, { text: 'Remove', style: 'destructive', onPress: () => removePlayer(game.id, player.id) }])}
                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} style={{ padding: 4, marginLeft: 4 }}>
                     <Text style={{ color: C.textMuted, fontSize: 14 }}>✕</Text>
@@ -1678,13 +1604,34 @@ function GameScreen({ id, onBack }) {
                   {player.buyIns.map(b => <View key={b.id} style={gs.chip}><Text style={{ color: C.textSecondary, fontSize: 12, fontWeight: '600' }}>{fmt(b.amount)}</Text></View>)}
                 </View>
               )}
-              {game.isActive && isHost && (
+              {game.isActive && !hasOut && (
                 <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
-                  <TouchableOpacity style={gs.actionBtn} onPress={() => setModal({ type: 'buyIn', player })} activeOpacity={0.7}>
-                    <Text style={gs.actionTxt}>+ Buy In</Text>
+                  <TouchableOpacity
+                    style={[gs.actionBtn, buyInDisabled && gs.actionBtnDisabled]}
+                    onPress={() => !buyInDisabled && setModal({ type: 'buyIn', player })}
+                    activeOpacity={buyInDisabled ? 1 : 0.7}>
+                    <Text style={[gs.actionTxt, buyInDisabled && { color: C.textMuted }]}>
+                      {isLastActive ? '— Last Player' : '+ Buy In'}
+                    </Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={[gs.actionBtn, hasOut && { backgroundColor: C.greenDim, borderColor: C.green }]} onPress={() => setModal({ type: 'cashOut', player })} activeOpacity={0.7}>
-                    <Text style={[gs.actionTxt, hasOut && { color: C.green }]}>{hasOut ? `✓ ${fmt(player.cashOut)}` : 'Cash Out'}</Text>
+                  <TouchableOpacity
+                    style={[gs.actionBtn, cashOutDisabled && gs.actionBtnDisabled]}
+                    onPress={() => !cashOutDisabled && setModal({ type: 'cashOut', player })}
+                    activeOpacity={cashOutDisabled ? 1 : 0.7}>
+                    <Text style={[gs.actionTxt, cashOutDisabled && { color: C.textMuted }]}>
+                      {noBuyIn ? 'Cash Out (no buy-in)' : 'Cash Out'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+              {/* Adjustment button visible on cashed-out rows only when balance is off */}
+              {game.isActive && hasOut && canEdit && hasImbalance && (
+                <View style={{ marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: C.border }}>
+                  <TouchableOpacity
+                    style={[gs.actionBtn, { borderColor: C.gold }]}
+                    onPress={() => setModal({ type: 'cashOut', player })}
+                    activeOpacity={0.7}>
+                    <Text style={[gs.actionTxt, { color: C.gold }]}>⚠️  Adjust Cash Out</Text>
                   </TouchableOpacity>
                 </View>
               )}
@@ -1692,7 +1639,31 @@ function GameScreen({ id, onBack }) {
           );
         })}
 
-        {game.isActive && isHost && (
+        {/* Table Amount */}
+        {game.isActive && (
+          <View style={gs.tableAmtCard}>
+            <View style={{ flex: 1 }}>
+              <Text style={gs.secTitle}>Table Amount</Text>
+              <Text style={{ color: C.textMuted, fontSize: 12, marginBottom: 4 }}>
+                Money remaining on the table (house, tips, unaccounted chips)
+              </Text>
+              {game.tableAmount !== null && (
+                <Text style={{ color: C.gold, fontSize: 20, fontWeight: '800' }}>{fmt(game.tableAmount)}</Text>
+              )}
+            </View>
+            {canEdit && (
+              <TouchableOpacity
+                style={[gs.actionBtn, { width: 90, marginLeft: 12 }, game.tableAmount !== null && { borderColor: C.gold }]}
+                onPress={() => setModal({ type: 'tableAmount' })} activeOpacity={0.7}>
+                <Text style={[gs.actionTxt, game.tableAmount !== null && { color: C.gold }]}>
+                  {game.tableAmount !== null ? `✓ ${fmt(game.tableAmount)}` : 'Set Amount'}
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+
+        {game.isActive && canEdit && (
           <View style={{ flexDirection: 'row', gap: 10, marginBottom: 24 }}>
             <TouchableOpacity style={[gs.addBtn, { flex: 1, marginBottom: 0 }]} onPress={() => setModal({ type: 'addPlayer' })} activeOpacity={0.7}>
               <Text style={{ color: C.blue, fontSize: 15, fontWeight: '700' }}>+ Add Player</Text>
@@ -1722,9 +1693,9 @@ function GameScreen({ id, onBack }) {
 
         <View style={{ marginTop: 16 }}>
           {game.isActive
-            ? isHost
+            ? canEdit
               ? <TouchableOpacity style={gs.endBtn} onPress={handleEnd} activeOpacity={0.8}><Text style={{ color: C.red, fontSize: 17, fontWeight: '700' }}>End Game</Text></TouchableOpacity>
-              : <View style={[gs.endBtn, { backgroundColor: C.surfaceRaised, borderColor: C.border }]}><Text style={{ color: C.textMuted, fontSize: 15, fontWeight: '600' }}>🔒  Only the host can end the game</Text></View>
+              : <View style={[gs.endBtn, { backgroundColor: C.surfaceRaised, borderColor: C.border }]}><Text style={{ color: C.textMuted, fontSize: 15, fontWeight: '600' }}>🔒  Unlock the app to end the game</Text></View>
             : <TouchableOpacity style={gs.shareBtn} onPress={handleShare} activeOpacity={0.8}><Text style={{ color: C.green, fontSize: 17, fontWeight: '700' }}>📤  Share Results</Text></TouchableOpacity>
           }
         </View>
@@ -1742,6 +1713,12 @@ function GameScreen({ id, onBack }) {
           onClose={() => setModal(null)}
           onSave={amt => { setCashOut(game.id, modal.player.id, amt); setModal(null); }}
           onClear={() => { clearCashOut(game.id, modal.player.id); setModal(null); }} />
+      )}
+      {modal?.type === 'tableAmount' && (
+        <CashOutModal visible playerName="Table" currentAmount={game.tableAmount}
+          onClose={() => setModal(null)}
+          onSave={amt => { setTableAmount(game.id, amt); setModal(null); }}
+          onClear={() => { clearTableAmount(game.id); setModal(null); }} />
       )}
       {modal?.type === 'drawSeats' && (
         <DrawSeatsModal visible players={game.players} onClose={() => setModal(null)} />
@@ -1761,15 +1738,17 @@ const gs = StyleSheet.create({
   statVal: { color: C.text, fontSize: 18, fontWeight: '800', marginBottom: 2, width: '100%', textAlign: 'center' },
   statLbl: { color: C.textMuted, fontSize: 10, fontWeight: '600', letterSpacing: 0.3, textTransform: 'uppercase', width: '100%', textAlign: 'center' },
   playerCard: { backgroundColor: C.surface, borderRadius: 14, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: C.border },
+  playerCardDone: { opacity: 0.65, borderColor: C.border },
   avatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: C.blueDim, alignItems: 'center', justifyContent: 'center', marginRight: 12, flexShrink: 0 },
   avatarTxt: { color: C.blue, fontSize: 14, fontWeight: '800' },
-  playerName: { color: C.text, fontSize: 16, fontWeight: '700', marginBottom: 8 },
+  playerName: { color: C.text, fontSize: 16, fontWeight: '700', marginBottom: 4 },
   amtCol: { alignItems: 'center', flex: 1 },
   amtLbl: { color: C.textMuted, fontSize: 10, fontWeight: '700', letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 2 },
   amtVal: { color: C.textSecondary, fontSize: 14, fontWeight: '600' },
   divider: { width: 1, height: 28, backgroundColor: C.border, marginHorizontal: 8 },
   chip: { backgroundColor: C.surfaceRaised, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: C.border },
   actionBtn: { flex: 1, backgroundColor: C.surfaceRaised, borderRadius: 10, paddingVertical: 10, alignItems: 'center', borderWidth: 1, borderColor: C.border },
+  actionBtnDisabled: { opacity: 0.38 },
   actionTxt: { color: C.textSecondary, fontSize: 13, fontWeight: '600' },
   addBtn: { backgroundColor: C.surface, borderRadius: 14, padding: 16, alignItems: 'center', borderWidth: 1, borderColor: C.border, marginBottom: 24 },
   emptyBox: { backgroundColor: C.surface, borderRadius: 14, padding: 20, alignItems: 'center', borderWidth: 1, borderColor: C.border, marginBottom: 10 },
@@ -1777,6 +1756,10 @@ const gs = StyleSheet.create({
   settlName: { fontSize: 15, fontWeight: '700', flex: 1 },
   endBtn: { backgroundColor: C.redDim, borderRadius: 16, paddingVertical: 16, alignItems: 'center', borderWidth: 1, borderColor: C.red },
   shareBtn: { backgroundColor: C.greenDim, borderRadius: 16, paddingVertical: 16, alignItems: 'center', borderWidth: 1, borderColor: C.green },
+  tableAmtCard: {
+    backgroundColor: C.surface, borderRadius: 14, padding: 14, marginBottom: 16,
+    flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#3d3510',
+  },
   imbalanceBanner: {
     backgroundColor: '#1f0d0d', borderRadius: 12, padding: 14, marginBottom: 20,
     borderWidth: 1, borderColor: C.red,
@@ -1797,4 +1780,5 @@ function App() {
   );
 }
 
-registerRootComponent(App);
+registerRootComponent ? registerRootComponent(App) : null;
+export default App;
