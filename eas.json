@@ -5,6 +5,9 @@
   },
   "build": {
     "preview": {
+      "env": {
+        "EAS_BUILD_NO_EXPO_GO_WARNING": "true"
+      },
       "android": {
         "buildType": "apk"
       },
@@ -14,6 +17,9 @@
       }
     },
     "production": {
+      "env": {
+        "EAS_BUILD_NO_EXPO_GO_WARNING": "true"
+      },
       "android": {
         "buildType": "app-bundle"
       },
