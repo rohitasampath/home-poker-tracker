@@ -1165,7 +1165,7 @@ function HomeScreen({ onNavigate }) {
           <Text style={hs.aceRank}>A</Text>
           <Text style={hs.aceSuit}>♠</Text>
         </View>
-        <Text style={hs.title}>Home Poker Tracker</Text>
+        <Text style={hs.title}>Poker Night Tracker</Text>
         <View style={hs.aceCard}>
           <Text style={hs.aceRank}>A</Text>
           <Text style={[hs.aceSuit, { color: '#e53935' }]}>♥</Text>
