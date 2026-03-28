@@ -222,7 +222,7 @@ function StoreProvider({ children }) {
 function useStore() { return useContext(Ctx); }
 
 // ─── Modals ───────────────────────────────────────────────────────────────────
-function AddPlayerModal({ visible, onClose, onAdd, roster = [], existingNames = [], onAddToRoster }) {
+function AddPlayerModal({ visible, onClose, onAdd, roster = [], existingNames = [], cashedOutNames = [], onAddToRoster }) {
   const [name, setName] = useState('');
   const [selected, setSelected] = useState(new Set());
   const [saveToRoster, setSaveToRoster] = useState(false);
@@ -268,6 +268,9 @@ function AddPlayerModal({ visible, onClose, onAdd, roster = [], existingNames = 
                       onPress={() => toggleSelect(r.id)}>
                       <Text style={[apm.chipTxt, sel && apm.chipTxtSelected]}>
                         {sel ? '✓  ' : ''}{r.name}
+                        {cashedOutNames.includes(r.name) ? (
+                          <Text style={{ fontSize: 10, color: sel ? '#000' : C.gold }}>{' '}↩ Re-join</Text>
+                        ) : null}
                       </Text>
                     </TouchableOpacity>
                   );
@@ -1702,7 +1705,8 @@ function GameScreen({ id, onBack }) {
       </ScrollView>
 
       <AddPlayerModal visible={modal?.type === 'addPlayer'} onClose={() => setModal(null)}
-        roster={roster} existingNames={game.players.map(p => p.name)}
+        roster={roster} existingNames={game.players.filter(p => p.cashOut === null).map(p => p.name)}
+        cashedOutNames={game.players.filter(p => p.cashOut !== null).map(p => p.name)}
         onAdd={n => addPlayer(game.id, n)} onAddToRoster={addToRoster} />
       {modal?.type === 'buyIn' && (
         <BuyInModal visible playerName={modal.player.name} onClose={() => setModal(null)}
