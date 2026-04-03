@@ -3,6 +3,7 @@ import { useWindowDimensions } from 'react-native';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
   Modal, TextInput, Alert, Pressable, ScrollView, Share, SafeAreaView, Linking, Switch,
+  KeyboardAvoidingView, Platform,
 } from 'react-native';
 
 // Graceful optional imports — present in standalone APK/IPA builds, absent in Expo Snack
@@ -11,6 +12,14 @@ try { ({ registerRootComponent } = require('expo')); } catch {}
 try { ({ SafeAreaProvider, useSafeAreaInsets } = require('react-native-safe-area-context')); } catch {}
 try { require('react-native-screens').enableScreens(); } catch {}
 try { require('@react-native-async-storage/async-storage'); } catch {}
+
+// expo-contacts — graceful fallback when unavailable
+let Contacts = null;
+try { Contacts = require('expo-contacts'); } catch {}
+
+// @react-native-community/datetimepicker — graceful fallback for Expo Snack web
+let DateTimePicker = null;
+try { DateTimePicker = require('@react-native-community/datetimepicker').default; } catch {}
 
 // Fallbacks for Expo Snack (uses built-in AsyncStorage via global)
 let AsyncStorage;
@@ -26,10 +35,10 @@ if (!useSafeAreaInsets) useSafeAreaInsets = () => ({ top: 0, bottom: 0, left: 0,
 
 // ─── Theme ───────────────────────────────────────────────────────────────────
 const C = {
-  bg: '#0a0a0a', surface: '#161616', surfaceAlt: '#1e1e1e', surfaceRaised: '#242424',
-  border: '#2a2a2a', green: '#30d158', greenDim: '#1a7a35', red: '#ff453a',
-  redDim: '#7a2020', gold: '#ffd60a', blue: '#0a84ff', blueDim: '#0a3d7a',
-  text: '#ffffff', textSecondary: '#aeaeb2', textMuted: '#636366',
+  bg: '#f4f0ec', surface: '#ffffff', surfaceAlt: '#faf7f3', surfaceRaised: '#ede8e2',
+  border: '#ddd8d0', green: '#3a9663', greenDim: '#d4f0e2', red: '#c84e68',
+  redDim: '#fde4ea', gold: '#b88810', blue: '#4a7be6', blueDim: '#dce9ff',
+  text: '#2c2440', textSecondary: '#5c5472', textMuted: '#9892a4',
 };
 
 // ─── Utils ────────────────────────────────────────────────────────────────────
@@ -99,6 +108,54 @@ function shareText(game) {
   return lines.join('\n');
 }
 
+// ─── Player Central Utils ─────────────────────────────────────────────────────
+function sNet(s) { return s.cashOut - s.buyIn - ((s.rebuys || 0) * (s.rebuyAmount || 0)); }
+function sDurH(s) { return s.endAt > s.startAt ? Math.max(0, (s.endAt - s.startAt) / 3600000) : 0; }
+function sDolH(s) { const h = sDurH(s); return h > 0.05 ? sNet(s) / h : 0; }
+function fmtH(h) { const hrs = Math.floor(h), m = Math.round((h % 1) * 60); return hrs > 0 ? (m > 0 ? `${hrs}h ${m}m` : `${hrs}h`) : `${m}m`; }
+function fmtGameLabel(s) {
+  const limit = { nl: 'NL', pl: 'PL', fl: 'FL' }[s.limit] || 'NL';
+  const game = { nlhe: "Texas Hold'em", plo: 'Omaha', other: s.gameOther || 'Poker' }[s.game] || "Hold'em";
+  const blinds = s.smallBlind && s.bigBlind ? `$${s.smallBlind}/$${s.bigBlind} ` : '';
+  return `${blinds}${limit} ${game}`;
+}
+function fmtDateTime(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) +
+    '  ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+}
+function parseDT(dateStr, timeStr) {
+  try {
+    const [m, d, y] = dateStr.split('/').map(Number);
+    const [time, ampm] = timeStr.trim().split(' ');
+    let [h, min] = time.split(':').map(Number);
+    if (ampm?.toLowerCase() === 'pm' && h !== 12) h += 12;
+    if (ampm?.toLowerCase() === 'am' && h === 12) h = 0;
+    return new Date(y, m - 1, d, h, min || 0).getTime();
+  } catch { return Date.now(); }
+}
+function nowDateStr() {
+  const d = new Date();
+  return `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
+}
+function nowTimeStr() {
+  const d = new Date();
+  let h = d.getHours(), m = d.getMinutes(), ap = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return `${h}:${String(m).padStart(2,'0')} ${ap}`;
+}
+const PICKER_DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const PICKER_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function fmtPickerDate(d) {
+  return `${PICKER_DAYS[d.getDay()]}  ${PICKER_MONTHS[d.getMonth()]} ${d.getDate()},  ${d.getFullYear()}`;
+}
+function fmtPickerTime(d) {
+  let h = d.getHours(), m = d.getMinutes(), ap = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return `${h}:${String(m).padStart(2,'0')} ${ap}`;
+}
+
 const SPADES = ['A', 'K', 'Q', 'J', '10', '9', '8', '7', '6', '5', '4', '3', '2'];
 const RANK_ORDER = { A: 12, K: 11, Q: 10, J: 9, '10': 8, '9': 7, '8': 6, '7': 5, '6': 4, '5': 3, '4': 2, '3': 1, '2': 0 };
 
@@ -161,6 +218,9 @@ function reducer(state, action) {
     }
     case 'LOCK':   return { ...state, isLocked: true };
     case 'UNLOCK': return { ...state, isLocked: false };
+    case 'ADD_SESSION': return { ...state, playerSessions: [action.session, ...state.playerSessions] };
+    case 'DEL_SESSION': return { ...state, playerSessions: state.playerSessions.filter(s => s.id !== action.id) };
+    case 'EDIT_SESSION': return { ...state, playerSessions: state.playerSessions.map(s => s.id === action.session.id ? action.session : s) };
     case 'HYDRATE': return { ...state, ...action.payload, isLocked: action.payload.isLocked ?? false };
     default: return state;
   }
@@ -168,7 +228,7 @@ function reducer(state, action) {
 const Ctx = createContext(null);
 const STORAGE_KEY = '@poker_tracker_v1';
 function StoreProvider({ children }) {
-  const [state, dispatch] = useReducer(reducer, { games: [], roster: [], settled: {}, isLocked: false });
+  const [state, dispatch] = useReducer(reducer, { games: [], roster: [], settled: {}, isLocked: false, playerSessions: [] });
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
@@ -189,6 +249,7 @@ function StoreProvider({ children }) {
       roster: state.roster,
       settled: state.settled,
       isLocked: state.isLocked,
+      playerSessions: state.playerSessions,
     })).catch(() => {});
   }, [state, hydrated]);
 
@@ -199,6 +260,7 @@ function StoreProvider({ children }) {
     roster: state.roster,
     settled: state.settled,
     isLocked: state.isLocked,
+    playerSessions: state.playerSessions,
     createGame: name => { const id = uid(); dispatch({ type: 'CREATE', id, name }); return id; },
     deleteGame: id => dispatch({ type: 'DELETE', id }),
     endGame: id => dispatch({ type: 'END', id }),
@@ -216,6 +278,9 @@ function StoreProvider({ children }) {
     unlockApp: () => dispatch({ type: 'UNLOCK' }),
     setTableAmount: (id, amount) => dispatch({ type: 'SET_TABLE', id, amount }),
     clearTableAmount: id => dispatch({ type: 'CLR_TABLE', id }),
+    addSession: session => dispatch({ type: 'ADD_SESSION', session: { ...session, id: uid() } }),
+    deleteSession: id => dispatch({ type: 'DEL_SESSION', id }),
+    editSession: session => dispatch({ type: 'EDIT_SESSION', session }),
   };
   return React.createElement(Ctx.Provider, { value: store }, children);
 }
@@ -252,6 +317,7 @@ function AddPlayerModal({ visible, onClose, onAdd, roster = [], existingNames = 
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <Pressable style={apm.overlay} onPress={onClose}>
         <Pressable style={apm.sheet} onPress={() => {}}>
           <Text style={apm.title}>Add Players</Text>
@@ -269,7 +335,7 @@ function AddPlayerModal({ visible, onClose, onAdd, roster = [], existingNames = 
                       <Text style={[apm.chipTxt, sel && apm.chipTxtSelected]}>
                         {sel ? '✓  ' : ''}{r.name}
                         {cashedOutNames.includes(r.name) ? (
-                          <Text style={{ fontSize: 10, color: sel ? '#000' : C.gold }}>{' '}↩ Re-join</Text>
+                          <Text style={{ fontSize: 10, color: sel ? '#fff' : C.gold }}>{' '}↩ Re-join</Text>
                         ) : null}
                       </Text>
                     </TouchableOpacity>
@@ -305,6 +371,7 @@ function AddPlayerModal({ visible, onClose, onAdd, roster = [], existingNames = 
           </View>
         </Pressable>
       </Pressable>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -336,6 +403,7 @@ function BuyInModal({ visible, playerName, onClose, onAdd }) {
   const submit = () => { if (!ok) return; onAdd(amt); setRaw(''); };
   return (
     <Modal visible={visible} transparent animationType="fade">
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <Pressable style={ms.overlay} onPress={() => { setRaw(''); onClose(); }}>
         <Pressable style={ms.box} onPress={() => {}}>
           <Text style={ms.title}>Buy In</Text>
@@ -357,11 +425,12 @@ function BuyInModal({ visible, playerName, onClose, onAdd }) {
               <Text style={ms.cancelTxt}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[ms.btn, { backgroundColor: C.green }, !ok && ms.disabled]} onPress={submit} disabled={!ok}>
-              <Text style={[ms.confirmTxt, { color: '#000' }]}>{ok ? `Add ${fmt(amt)}` : 'Add'}</Text>
+              <Text style={ms.confirmTxt}>{ok ? `Add ${fmt(amt)}` : 'Add'}</Text>
             </TouchableOpacity>
           </View>
         </Pressable>
       </Pressable>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -426,6 +495,7 @@ function CashOutModal({ visible, playerName, currentAmount, onClose, onSave, onC
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <Pressable style={co.overlay} onPress={onClose}>
         <Pressable style={[co.sheet, { paddingBottom: Math.max(24, insets.bottom + 16) }]} onPress={() => {}}>
           <Text style={ms.title}>Cash Out</Text>
@@ -507,13 +577,14 @@ function CashOutModal({ visible, playerName, currentAmount, onClose, onSave, onC
             )}
             <TouchableOpacity style={[ms.btn, { backgroundColor: C.gold }, !canSave && ms.disabled]}
               onPress={submit} disabled={!canSave}>
-              <Text style={[ms.confirmTxt, { color: '#000' }]}>
+              <Text style={ms.confirmTxt}>
                 {canSave ? `Cash Out  ${ Number.isInteger(finalAmt) ? finalAmt : finalAmt.toFixed(2) }` : 'Cash Out'}
               </Text>
             </TouchableOpacity>
           </View>
         </Pressable>
       </Pressable>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -648,6 +719,170 @@ const dss = StyleSheet.create({
   cardSuit: { color: '#111827', fontSize: 13, lineHeight: 15 },
 });
 
+// ─── Contact Picker Modal ─────────────────────────────────────────────────────
+function ContactPickerModal({ visible, onClose, existingNames, onImport }) {
+  const { height: screenH } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const listH = Math.max(120, screenH * 0.75 - insets.bottom - 180);
+
+  const [contacts, setContacts] = useState([]);
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState(new Set());
+  const [status, setStatus] = useState('idle'); // idle | loading | denied | ready
+
+  React.useEffect(() => {
+    if (!visible) { setSelected(new Set()); setSearch(''); setStatus('idle'); return; }
+    if (!Contacts) { setStatus('unavailable'); return; }
+    setStatus('loading');
+    Contacts.requestPermissionsAsync().then(({ status: s }) => {
+      if (s !== 'granted') { setStatus('denied'); return; }
+      return Contacts.getContactsAsync({
+        fields: [Contacts.Fields.Name, Contacts.Fields.PhoneNumbers],
+        sort: Contacts.SortTypes.FirstName,
+      });
+    }).then(result => {
+      if (!result) return;
+      const list = result.data
+        .filter(c => c.name && c.phoneNumbers?.length)
+        .map(c => ({
+          id: c.id,
+          name: c.name,
+          phone: c.phoneNumbers[0].number.replace(/\s+/g, ''),
+        }));
+      setContacts(list);
+      setStatus('ready');
+    }).catch(() => setStatus('denied'));
+  }, [visible]);
+
+  const toggle = id => setSelected(prev => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  const filtered = contacts.filter(c =>
+    c.name.toLowerCase().includes(search.toLowerCase()) ||
+    c.phone.includes(search)
+  );
+
+  const alreadyInRoster = name => existingNames.includes(name);
+
+  const handleImport = () => {
+    contacts.filter(c => selected.has(c.id)).forEach(c => onImport(c.name, c.phone));
+    onClose();
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={dss.overlay} onPress={onClose}>
+        <Pressable style={dss.sheet} onPress={() => {}}>
+          <Text style={dss.title}>📱  Import from Contacts</Text>
+
+          {status === 'unavailable' && (
+            <View style={{ alignItems: 'center', paddingVertical: 32 }}>
+              <Text style={{ fontSize: 36, marginBottom: 10 }}>📵</Text>
+              <Text style={{ color: C.textSecondary, fontSize: 15, fontWeight: '600', textAlign: 'center' }}>
+                Contacts not available
+              </Text>
+              <Text style={{ color: C.textMuted, fontSize: 13, textAlign: 'center', marginTop: 6 }}>
+                This feature requires a native build (APK or TestFlight)
+              </Text>
+            </View>
+          )}
+
+          {status === 'loading' && (
+            <View style={{ alignItems: 'center', paddingVertical: 32 }}>
+              <Text style={{ color: C.textSecondary, fontSize: 15 }}>Loading contacts…</Text>
+            </View>
+          )}
+
+          {status === 'denied' && (
+            <View style={{ alignItems: 'center', paddingVertical: 32 }}>
+              <Text style={{ fontSize: 36, marginBottom: 10 }}>🚫</Text>
+              <Text style={{ color: C.textSecondary, fontSize: 15, fontWeight: '600', textAlign: 'center' }}>
+                Contacts permission denied
+              </Text>
+              <Text style={{ color: C.textMuted, fontSize: 13, textAlign: 'center', marginTop: 6, marginBottom: 16 }}>
+                Go to Settings → Poker Night Tracker → Contacts and enable access
+              </Text>
+              <TouchableOpacity style={[ms.btn, { backgroundColor: C.blue }]}
+                onPress={() => { try { Contacts && Linking.openSettings(); } catch {} }}>
+                <Text style={ms.confirmTxt}>Open Settings</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {status === 'ready' && (
+            <>
+              <TextInput
+                style={[ms.input, { marginBottom: 12 }]}
+                placeholder="Search by name or number…"
+                placeholderTextColor={C.textMuted}
+                value={search} onChangeText={setSearch}
+                clearButtonMode="while-editing"
+              />
+              <Text style={{ color: C.textMuted, fontSize: 12, marginBottom: 8 }}>
+                {selected.size > 0 ? `${selected.size} selected` : `${filtered.length} contacts`}
+                {filtered.some(c => alreadyInRoster(c.name)) ? '  ·  Grey = already in roster' : ''}
+              </Text>
+              <ScrollView style={{ maxHeight: listH }} showsVerticalScrollIndicator={false} nestedScrollEnabled>
+                {filtered.length === 0 ? (
+                  <Text style={{ color: C.textMuted, textAlign: 'center', paddingVertical: 24 }}>No contacts found</Text>
+                ) : filtered.map(c => {
+                  const inRoster = alreadyInRoster(c.name);
+                  const sel = selected.has(c.id);
+                  return (
+                    <TouchableOpacity key={c.id}
+                      style={[cp.row, sel && cp.rowSelected, inRoster && cp.rowDim]}
+                      onPress={() => !inRoster && toggle(c.id)}
+                      activeOpacity={inRoster ? 1 : 0.7}>
+                      <View style={[cp.check, sel && cp.checkOn]}>
+                        {sel && <Text style={{ color: '#fff', fontSize: 11, fontWeight: '900' }}>✓</Text>}
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[cp.name, inRoster && { color: C.textMuted }]}>{c.name}</Text>
+                        <Text style={cp.phone}>{c.phone}{inRoster ? '  · already in roster' : ''}</Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+              <View style={[ms.row, { marginTop: 14 }]}>
+                <TouchableOpacity style={[ms.btn, ms.cancel]} onPress={onClose}>
+                  <Text style={ms.cancelTxt}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[ms.btn, ms.confirm, selected.size === 0 && ms.disabled]}
+                  onPress={handleImport} disabled={selected.size === 0}>
+                  <Text style={ms.confirmTxt}>
+                    {selected.size > 0 ? `Import ${selected.size}` : 'Import'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </>
+          )}
+
+          {(status === 'unavailable' || status === 'denied') && (
+            <TouchableOpacity style={[ms.btn, { backgroundColor: C.surfaceRaised, marginTop: 8 }]} onPress={onClose}>
+              <Text style={[ms.confirmTxt, { color: C.textSecondary }]}>Close</Text>
+            </TouchableOpacity>
+          )}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+const cp = StyleSheet.create({
+  row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: C.border, gap: 12 },
+  rowSelected: { backgroundColor: C.blueDim },
+  rowDim: { opacity: 0.4 },
+  check: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
+  checkOn: { backgroundColor: C.blue, borderColor: C.blue },
+  name: { color: C.text, fontSize: 15, fontWeight: '600' },
+  phone: { color: C.textMuted, fontSize: 12, marginTop: 1 },
+});
+
 // ─── Roster Modal ─────────────────────────────────────────────────────────────
 function RosterModal({ visible, roster, onClose, onAdd, onRemove, onSetPhone }) {
   const { height: screenH } = useWindowDimensions();
@@ -660,6 +895,7 @@ function RosterModal({ visible, roster, onClose, onAdd, onRemove, onSetPhone }) 
   const [phone, setPhone] = useState('');
   const [editingId, setEditingId] = useState(null);
   const [editPhone, setEditPhone] = useState('');
+  const [showContacts, setShowContacts] = useState(false);
 
   React.useEffect(() => {
     if (!visible) { setEditingId(null); setEditPhone(''); }
@@ -748,6 +984,13 @@ function RosterModal({ visible, roster, onClose, onAdd, onRemove, onSetPhone }) 
 
           {/* Add new player */}
           <View style={{ marginTop: 16, gap: 10 }}>
+            {/* Import from Contacts button */}
+            <TouchableOpacity
+              style={[rm.addBtn, { backgroundColor: C.surfaceRaised, borderWidth: 1, borderColor: C.blue }]}
+              onPress={() => setShowContacts(true)}
+              activeOpacity={0.7}>
+              <Text style={[rm.addBtnTxt, { color: C.blue }]}>📱  Import from Contacts</Text>
+            </TouchableOpacity>
             <View style={{ flexDirection: 'row', gap: 8 }}>
               <TextInput style={[rm.input, { flex: 1.4 }]} placeholder="Name" placeholderTextColor={C.textMuted}
                 value={name} onChangeText={setName} maxLength={30} returnKeyType="next" />
@@ -766,6 +1009,12 @@ function RosterModal({ visible, roster, onClose, onAdd, onRemove, onSetPhone }) 
           </View>
         </Pressable>
       </Pressable>
+      <ContactPickerModal
+        visible={showContacts}
+        existingNames={roster.map(r => r.name)}
+        onImport={(n, p) => onAdd(n, p)}
+        onClose={() => setShowContacts(false)}
+      />
     </Modal>
   );
 }
@@ -969,7 +1218,7 @@ function DebtsModal({ visible, games, settled, onClose, onSettle, onUnsettle }) 
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={dbt.root}>
         <View style={dbt.header}>
-          <Text style={dbt.title}>💰 Settle Up</Text>
+          <Text style={dbt.title}>🤝 Settle Up</Text>
           {unpaid.length > 0 && (
             <View style={dbt.badge}><Text style={dbt.badgeTxt}>{unpaid.length}</Text></View>
           )}
@@ -1085,6 +1334,710 @@ const dbt = StyleSheet.create({
 
 // ─── RSVP Section ─────────────────────────────────────────────────────────────
 
+// ─── Player Central ───────────────────────────────────────────────────────────
+function BarChart({ data, chartH = 150 }) {
+  if (!data?.length) return null;
+  const maxAbs = Math.max(1, ...data.map(d => Math.abs(d.value)));
+  return (
+    <View>
+      <View style={{ flexDirection: 'row', alignItems: 'flex-end', height: chartH, gap: 4 }}>
+        {data.map((d, i) => {
+          const barH = Math.max(32, (Math.abs(d.value) / maxAbs) * chartH * 0.9);
+          const pos = d.value >= 0;
+          const col   = d.value === 0 ? C.textMuted  : pos ? C.green    : C.red;
+          const bgCol = d.value === 0 ? C.surfaceRaised : pos ? C.greenDim : C.redDim;
+          const label = d.value === 0 ? '' : (pos ? '+$' : '-$') + Math.abs(Math.round(d.value));
+          return (
+            <View key={i} style={{ flex: 1, alignItems: 'center', justifyContent: 'flex-end', height: chartH }}>
+              <View style={{
+                width: '82%', height: barH,
+                backgroundColor: bgCol,
+                borderRadius: 5,
+                borderWidth: 1.5,
+                borderColor: col,
+                justifyContent: 'center',
+                alignItems: 'center',
+                overflow: 'hidden',
+              }}>
+                {label !== '' && (
+                  <Text style={{
+                    color: col, fontSize: 9, fontWeight: '800',
+                    transform: [{ rotate: '-90deg' }],
+                    width: barH - 6,
+                    textAlign: 'center',
+                  }} numberOfLines={1}>{label}</Text>
+                )}
+              </View>
+            </View>
+          );
+        })}
+      </View>
+      <View style={{ flexDirection: 'row', gap: 4, marginTop: 6 }}>
+        {data.map((d, i) => (
+          <Text key={i} style={{ flex: 1, color: C.textMuted, fontSize: 10, textAlign: 'center' }}>{d.label}</Text>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+// These must be module-level so React doesn't unmount/remount TextInputs on each keystroke
+function FormSel({ label, value, opts, onChange }) {
+  return (
+    <View style={{ marginBottom: 14 }}>
+      <Text style={pc.fieldLbl}>{label}</Text>
+      <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+        {opts.map(o => (
+          <TouchableOpacity key={o.v} style={[pc.selBtn, value === o.v && pc.selBtnOn]}
+            onPress={() => onChange(o.v)} activeOpacity={0.7}>
+            <Text style={[pc.selTxt, value === o.v && { color: '#fff' }]}>{o.l}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    </View>
+  );
+}
+function FormField({ label, value, onChange, kbType, placeholder, multiline, height }) {
+  return (
+    <View style={{ flex: 1 }}>
+      <Text style={pc.fieldLbl}>{label}</Text>
+      <TextInput
+        style={[pc.fieldInput, height && { height, textAlignVertical: 'top' }]}
+        value={value} onChangeText={onChange}
+        keyboardType={kbType || 'default'}
+        placeholder={placeholder || ''} placeholderTextColor={C.textMuted}
+        multiline={!!multiline} numberOfLines={multiline ? 3 : 1}
+      />
+    </View>
+  );
+}
+
+function AddSessionModal({ visible, onClose, onSave, initial }) {
+  const { height: screenH } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const dateToStr = d => `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
+  const timeToStr = d => { let h=d.getHours(),m=d.getMinutes(),ap=h>=12?'PM':'AM'; h=h%12||12; return `${h}:${String(m).padStart(2,'0')} ${ap}`; };
+
+  const blank = () => {
+    const now = new Date();
+    return {
+      type: 'cash', tableSize: 'full-ring', room: 'home', game: 'nlhe', limit: 'nl',
+      dateObj: now, startTimeObj: now,
+      endTimeObj: new Date(now.getTime() + 3 * 3600000),
+      dateStr: nowDateStr(), startStr: nowTimeStr(),
+      endStr: timeToStr(new Date(now.getTime() + 3 * 3600000)),
+      location: '', smallBlind: '', bigBlind: '', buyIn: '', cashOut: '',
+      rebuys: '', rebuyAmount: '', handsPerHour: '', notes: '',
+    };
+  };
+  const [f, setF] = useState(blank);
+  const [picker, setPicker] = useState(null); // null | 'date' | 'start' | 'end'
+  const up = (k, v) => setF(p => ({ ...p, [k]: v }));
+
+
+  // Update both the string and the parsed Date object when a text field changes
+  const upDateStr = v => {
+    up('dateStr', v);
+    const ts = parseDT(v, f.startStr);
+    if (!isNaN(ts)) up('dateObj', new Date(ts));
+  };
+  const upStartStr = v => {
+    up('startStr', v);
+    const ts = parseDT(f.dateStr, v);
+    if (!isNaN(ts)) up('startTimeObj', new Date(ts));
+  };
+  const upEndStr = v => {
+    up('endStr', v);
+    const ts = parseDT(f.dateStr, v);
+    if (!isNaN(ts)) up('endTimeObj', new Date(ts));
+  };
+
+  React.useEffect(() => {
+    if (visible) {
+      if (initial) {
+        const d = new Date(initial.startAt), e = new Date(initial.endAt);
+        setF({
+          type: initial.type||'cash', tableSize: initial.tableSize||'full-ring',
+          room: initial.room||'home', game: initial.game||'nlhe', limit: initial.limit||'nl',
+          dateObj: d, startTimeObj: d, endTimeObj: e,
+          dateStr: dateToStr(d), startStr: timeToStr(d), endStr: timeToStr(e),
+          location: initial.location||'', smallBlind: String(initial.smallBlind||''),
+          bigBlind: String(initial.bigBlind||''), buyIn: String(initial.buyIn||''),
+          cashOut: String(initial.cashOut||''), rebuys: String(initial.rebuys||''),
+          rebuyAmount: String(initial.rebuyAmount||''), handsPerHour: String(initial.handsPerHour||''),
+          notes: initial.notes||''
+        });
+      } else {
+        setF(blank());
+      }
+      setPicker(null);
+    }
+  }, [visible]);
+
+  const handleSave = () => {
+    let startAt, endAt;
+    if (DateTimePicker) {
+      startAt = new Date(f.dateObj);
+      startAt.setHours(f.startTimeObj.getHours(), f.startTimeObj.getMinutes(), 0, 0);
+      endAt = new Date(f.dateObj);
+      endAt.setHours(f.endTimeObj.getHours(), f.endTimeObj.getMinutes(), 0, 0);
+    } else {
+      startAt = new Date(parseDT(f.dateStr, f.startStr));
+      endAt = new Date(parseDT(f.dateStr, f.endStr));
+      if (isNaN(startAt) || isNaN(endAt)) { Alert.alert('Invalid Date/Time', 'Use M/D/YYYY and H:MM AM/PM format.'); return; }
+    }
+
+    // End time must be after start time
+    if (endAt <= startAt) {
+      Alert.alert('Invalid Time', 'End time must be after start time.');
+      return;
+    }
+
+    // Buy-in is required
+    if (f.buyIn.trim() === '' || isNaN(parseFloat(f.buyIn)) || parseFloat(f.buyIn) < 0) {
+      Alert.alert('Buy-In Required', 'Please enter a valid buy-in amount (0 or more).');
+      return;
+    }
+
+    // Cash-out must be a valid number if entered
+    if (f.cashOut.trim() !== '' && (isNaN(parseFloat(f.cashOut)) || parseFloat(f.cashOut) < 0)) {
+      Alert.alert('Invalid Cash-Out', 'Please enter a valid cash-out amount (0 or more).');
+      return;
+    }
+
+    // Rebuy count and rebuy amount must both be filled in if either is entered
+    const hasRebuyCount = f.rebuys.trim() !== '' && parseInt(f.rebuys) > 0;
+    const hasRebuyAmt   = f.rebuyAmount.trim() !== '' && parseFloat(f.rebuyAmount) > 0;
+    if (hasRebuyAmt && !hasRebuyCount) {
+      Alert.alert('Rebuys Incomplete', 'You entered a rebuy amount but no rebuy count.\nPlease enter the number of rebuys.');
+      return;
+    }
+    if (hasRebuyCount && !hasRebuyAmt) {
+      Alert.alert('Rebuys Incomplete', 'You entered a rebuy count but no rebuy amount.\nPlease enter the amount per rebuy.');
+      return;
+    }
+
+    // Both blinds required if either is entered; small blind must be less than big blind
+    const sb = parseFloat(f.smallBlind), bb = parseFloat(f.bigBlind);
+    const hasSB = f.smallBlind.trim() !== '' && !isNaN(sb) && sb > 0;
+    const hasBB = f.bigBlind.trim()  !== '' && !isNaN(bb) && bb > 0;
+    if (hasSB && !hasBB) {
+      Alert.alert('Blinds Incomplete', 'You entered a small blind but no big blind.\nPlease enter the big blind amount.');
+      return;
+    }
+    if (hasBB && !hasSB) {
+      Alert.alert('Blinds Incomplete', 'You entered a big blind but no small blind.\nPlease enter the small blind amount.');
+      return;
+    }
+    if (hasSB && hasBB && sb >= bb) {
+      Alert.alert('Invalid Blinds', `Small blind ($${sb}) must be less than big blind ($${bb}).`);
+      return;
+    }
+
+    // Hands/hour must be a positive integer if entered
+    if (f.handsPerHour.trim() !== '' && (isNaN(parseInt(f.handsPerHour)) || parseInt(f.handsPerHour) <= 0)) {
+      Alert.alert('Invalid Hands/Hour', 'Please enter a positive number for hands per hour.');
+      return;
+    }
+
+    onSave({
+      ...(initial || {}),
+      type: f.type, tableSize: f.tableSize, room: f.room, game: f.game, limit: f.limit,
+      startAt: startAt.getTime(), endAt: endAt.getTime(), location: f.location.trim(),
+      smallBlind: hasSB ? sb : null, bigBlind: hasBB ? bb : null,
+      buyIn: parseFloat(f.buyIn) || 0, cashOut: parseFloat(f.cashOut) || 0,
+      rebuys: parseInt(f.rebuys) || 0, rebuyAmount: parseFloat(f.rebuyAmount) || 0,
+      handsPerHour: parseInt(f.handsPerHour) || 0, notes: f.notes.trim(),
+    });
+    onClose();
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <Pressable style={dss.overlay} onPress={onClose}>
+        <Pressable style={[dss.sheet, { height: Math.min(screenH * 0.92, 700), paddingBottom: insets.bottom + 8, flexShrink: 1 }]} onPress={() => {}}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 16 }}>
+            <Text style={[dss.title, { flex: 1 }]}>{initial ? 'Edit Session' : 'Add Session'}</Text>
+            <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <Text style={{ color: C.textMuted, fontSize: 22 }}>✕</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+            <FormSel label="TYPE" value={f.type} onChange={v => up('type', v)} opts={[{v:'cash',l:'Cash Game'},{v:'tournament',l:'Tournament'}]} />
+            <FormSel label="ROOM" value={f.room} onChange={v => up('room', v)} opts={[{v:'home',l:'Home Game'},{v:'casino',l:'Casino'},{v:'online',l:'Online'}]} />
+            <FormSel label="GAME" value={f.game} onChange={v => up('game', v)} opts={[{v:'nlhe',l:"NL Hold'em"},{v:'plo',l:'Omaha'},{v:'other',l:'Other'}]} />
+            <FormSel label="LIMIT" value={f.limit} onChange={v => up('limit', v)} opts={[{v:'nl',l:'No Limit'},{v:'pl',l:'Pot Limit'},{v:'fl',l:'Fixed'}]} />
+            <FormSel label="TABLE SIZE" value={f.tableSize} onChange={v => up('tableSize', v)} opts={[{v:'full-ring',l:'Full Ring'},{v:'6max',l:'6-Max'},{v:'hud',l:'Heads Up'}]} />
+
+            {/* ── Date & Time — native picker (device) or text input (web/Snack) ── */}
+            {DateTimePicker ? (
+              <>
+                <View style={{ marginBottom: 14 }}>
+                  <Text style={pc.fieldLbl}>DATE</Text>
+                  <View style={{ flexDirection: 'row', gap: 8 }}>
+                    <TouchableOpacity style={[pc.pickerBtn, { flex: 1 }]} onPress={() => setPicker('date')} activeOpacity={0.7}>
+                      <Text style={pc.pickerIcon}>📅</Text>
+                      <Text style={pc.pickerBtnTxt}>{fmtPickerDate(f.dateObj)}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={pc.nowBtn} onPress={() => { const n=new Date(); up('dateObj',n); up('dateStr',dateToStr(n)); }}>
+                      <Text style={pc.nowBtnTxt}>Today</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+                <View style={{ flexDirection: 'row', gap: 10, marginBottom: 14 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={pc.fieldLbl}>START TIME</Text>
+                    <TouchableOpacity style={pc.pickerBtn} onPress={() => setPicker('start')} activeOpacity={0.7}>
+                      <Text style={pc.pickerIcon}>🕐</Text>
+                      <Text style={pc.pickerBtnTxt}>{fmtPickerTime(f.startTimeObj)}</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={pc.fieldLbl}>END TIME</Text>
+                    <TouchableOpacity style={pc.pickerBtn} onPress={() => setPicker('end')} activeOpacity={0.7}>
+                      <Text style={pc.pickerIcon}>🕐</Text>
+                      <Text style={pc.pickerBtnTxt}>{fmtPickerTime(f.endTimeObj)}</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </>
+            ) : (
+              <>
+                <View style={{ marginBottom: 14 }}>
+                  <Text style={pc.fieldLbl}>DATE  (M/D/YYYY)</Text>
+                  <View style={{ flexDirection: 'row', gap: 8 }}>
+                    <TextInput style={[pc.fieldInput, { flex: 1 }]} value={f.dateStr} onChangeText={upDateStr}
+                      placeholder="4/1/2026" placeholderTextColor={C.textMuted} keyboardType="numbers-and-punctuation" />
+                    <TouchableOpacity style={pc.nowBtn} onPress={() => { const n=new Date(); up('dateObj',n); up('dateStr',dateToStr(n)); }}>
+                      <Text style={pc.nowBtnTxt}>Today</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+                <View style={{ flexDirection: 'row', gap: 10, marginBottom: 14 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={pc.fieldLbl}>START  (H:MM AM/PM)</Text>
+                    <View style={{ flexDirection: 'row', gap: 6 }}>
+                      <TextInput style={[pc.fieldInput, { flex: 1 }]} value={f.startStr} onChangeText={upStartStr}
+                        placeholder="8:00 PM" placeholderTextColor={C.textMuted} />
+                      <TouchableOpacity style={pc.nowBtn} onPress={() => { const n=new Date(); up('startTimeObj',n); up('startStr',timeToStr(n)); }}>
+                        <Text style={pc.nowBtnTxt}>Now</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={pc.fieldLbl}>END  (H:MM AM/PM)</Text>
+                    <View style={{ flexDirection: 'row', gap: 6 }}>
+                      <TextInput style={[pc.fieldInput, { flex: 1 }]} value={f.endStr} onChangeText={upEndStr}
+                        placeholder="11:00 PM" placeholderTextColor={C.textMuted} />
+                      <TouchableOpacity style={pc.nowBtn} onPress={() => { const n=new Date(); up('endTimeObj',n); up('endStr',timeToStr(n)); }}>
+                        <Text style={pc.nowBtnTxt}>Now</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                </View>
+              </>
+            )}
+
+            <View style={{ marginBottom: 14 }}>
+              <Text style={pc.fieldLbl}>LOCATION</Text>
+              <TextInput style={pc.fieldInput} value={f.location} onChangeText={v => up('location', v)}
+                placeholder="e.g. John's place" placeholderTextColor={C.textMuted} />
+            </View>
+
+            <View style={{ flexDirection: 'row', gap: 10, marginBottom: 14 }}>
+              <FormField label="SMALL BLIND" value={f.smallBlind} onChange={v => up('smallBlind', v)} kbType="decimal-pad" placeholder="0.25" />
+              <FormField label="BIG BLIND" value={f.bigBlind} onChange={v => up('bigBlind', v)} kbType="decimal-pad" placeholder="0.50" />
+            </View>
+            <View style={{ flexDirection: 'row', gap: 10, marginBottom: 14 }}>
+              <FormField label="BUY-IN ($)" value={f.buyIn} onChange={v => up('buyIn', v)} kbType="decimal-pad" placeholder="100" />
+              <FormField label="CASH-OUT ($)" value={f.cashOut} onChange={v => up('cashOut', v)} kbType="decimal-pad" placeholder="150" />
+            </View>
+            <View style={{ flexDirection: 'row', gap: 10, marginBottom: 14 }}>
+              <FormField label="# REBUYS" value={f.rebuys} onChange={v => up('rebuys', v)} kbType="number-pad" placeholder="0" />
+              <FormField label="REBUY AMOUNT ($)" value={f.rebuyAmount} onChange={v => up('rebuyAmount', v)} kbType="decimal-pad" placeholder="0" />
+            </View>
+            <View style={{ flexDirection: 'row', gap: 10, marginBottom: 14 }}>
+              <FormField label="HANDS/HOUR" value={f.handsPerHour} onChange={v => up('handsPerHour', v)} kbType="number-pad" placeholder="25" />
+            </View>
+
+            <View style={{ marginBottom: 20 }}>
+              <Text style={pc.fieldLbl}>SESSION NOTES</Text>
+              <TextInput style={[pc.fieldInput, { height: 72, textAlignVertical: 'top' }]}
+                value={f.notes} onChangeText={v => up('notes', v)}
+                placeholder="How did the session go?" placeholderTextColor={C.textMuted}
+                multiline numberOfLines={3} />
+            </View>
+            <View style={{ height: 20 }} />
+          </ScrollView>
+
+          {/* ── iOS date/time picker — bottom sheet ── */}
+          {picker !== null && DateTimePicker && Platform.OS === 'ios' && (
+            <Modal visible transparent animationType="slide">
+              <Pressable style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.55)' }}
+                onPress={() => setPicker(null)}>
+                <Pressable style={{ backgroundColor: C.surfaceAlt, borderTopLeftRadius: 22, borderTopRightRadius: 22, paddingTop: 14, paddingBottom: 40, paddingHorizontal: 18 }}
+                  onPress={() => {}}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                    <TouchableOpacity onPress={() => setPicker(null)} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                      <Text style={{ color: C.textMuted, fontSize: 16 }}>Cancel</Text>
+                    </TouchableOpacity>
+                    <Text style={{ color: C.text, fontWeight: '700', fontSize: 17 }}>
+                      {picker === 'date' ? 'Select Date' : picker === 'start' ? 'Start Time' : 'End Time'}
+                    </Text>
+                    <TouchableOpacity onPress={() => setPicker(null)} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                      <Text style={{ color: C.blue, fontSize: 16, fontWeight: '700' }}>Done</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <DateTimePicker
+                    value={picker === 'date' ? f.dateObj : picker === 'start' ? f.startTimeObj : f.endTimeObj}
+                    mode={picker === 'date' ? 'date' : 'time'}
+                    display="spinner"
+                    onChange={(_, date) => {
+                      if (date) up(picker === 'date' ? 'dateObj' : picker === 'start' ? 'startTimeObj' : 'endTimeObj', date);
+                    }}
+                    themeVariant="light"
+                    style={{ alignSelf: 'center' }}
+                  />
+                </Pressable>
+              </Pressable>
+            </Modal>
+          )}
+
+          {/* ── Android date/time picker — system dialog ── */}
+          {picker !== null && DateTimePicker && Platform.OS === 'android' && (
+            <DateTimePicker
+              value={picker === 'date' ? f.dateObj : picker === 'start' ? f.startTimeObj : f.endTimeObj}
+              mode={picker === 'date' ? 'date' : 'time'}
+              display="default"
+              onChange={(_, date) => {
+                setPicker(null);
+                if (date) up(picker === 'date' ? 'dateObj' : picker === 'start' ? 'startTimeObj' : 'endTimeObj', date);
+              }}
+            />
+          )}
+          <View style={[ms.row, { marginTop: 4 }]}>
+            <TouchableOpacity style={[ms.btn, ms.cancel]} onPress={onClose}>
+              <Text style={ms.cancelTxt}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[ms.btn, ms.confirm]} onPress={handleSave}>
+              <Text style={ms.confirmTxt}>{initial ? 'Save Changes' : 'Add Session'}</Text>
+            </TouchableOpacity>
+          </View>
+        </Pressable>
+      </Pressable>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+function PlayerCentralScreen({ onBack }) {
+  const { playerSessions, addSession, deleteSession, editSession } = useStore();
+  const [tab, setTab] = useState('overview');
+  const [showAdd, setShowAdd] = useState(false);
+  const [editItem, setEditItem] = useState(null);
+
+  const totalNet = playerSessions.reduce((s, x) => s + sNet(x), 0);
+  const totalBuyInAmt = playerSessions.reduce((s, x) => s + x.buyIn + ((x.rebuys||0)*(x.rebuyAmount||0)), 0);
+  const totalCashOutAmt = playerSessions.reduce((s, x) => s + x.cashOut, 0);
+  const totalHours = playerSessions.reduce((s, x) => s + sDurH(x), 0);
+  const totalHands = playerSessions.reduce((s, x) => s + Math.round((x.handsPerHour||0) * sDurH(x)), 0);
+  const dolPerHour = totalHours > 0.05 ? totalNet / totalHours : 0;
+  const sessions100 = totalHands > 0 ? (totalNet / totalHands) * 100 : 0;
+  const roi = totalBuyInAmt > 0 ? (totalNet / totalBuyInAmt) * 100 : 0;
+  const wonCount = playerSessions.filter(s => sNet(s) > 0).length;
+  const wonPct = playerSessions.length > 0 ? (wonCount / playerSessions.length) * 100 : 0;
+
+  // Locations
+  const byLocation = () => {
+    const map = {};
+    playerSessions.forEach(s => {
+      const loc = s.location || 'Unknown';
+      if (!map[loc]) map[loc] = { sessions: 0, net: 0, buyIn: 0, cashOut: 0, hours: 0, won: 0, list: [] };
+      map[loc].sessions++;
+      map[loc].net += sNet(s);
+      map[loc].buyIn += s.buyIn + ((s.rebuys || 0) * (s.rebuyAmount || 0));
+      map[loc].cashOut += s.cashOut;
+      map[loc].hours += sDurH(s);
+      if (sNet(s) > 0) map[loc].won++;
+      map[loc].list.push(s);
+    });
+    return Object.entries(map).map(([name, d]) => ({ name, ...d, winPct: d.sessions > 0 ? (d.won / d.sessions) * 100 : 0 }))
+      .sort((a, b) => b.net - a.net);
+  };
+
+  const StatRow = ({ label, val, col }) => (
+    <View style={pc.statRow}>
+      <Text style={pc.statLabel}>{label}</Text>
+      <Text style={[pc.statVal, col && { color: col }]}>{val}</Text>
+    </View>
+  );
+
+  const TABS = [
+    { k: 'overview', l: 'Overview' }, { k: 'sessions', l: 'Sessions' },
+    { k: 'locations', l: 'Locations' },
+  ];
+
+  return (
+    <SafeAreaView style={pc.root}>
+      <View style={pc.header}>
+        <TouchableOpacity onPress={onBack} style={{ paddingRight: 12 }}>
+          <Text style={{ color: C.blue, fontSize: 17, fontWeight: '600' }}>‹ Back</Text>
+        </TouchableOpacity>
+        <Text style={pc.headerTitle}>Bankroll</Text>
+        <TouchableOpacity style={pc.addBtn} onPress={() => { setEditItem(null); setShowAdd(true); }}>
+          <Text style={pc.addBtnTxt}>＋</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Sub-tabs */}
+      <View style={pc.tabBar}>
+        {TABS.map(t => (
+          <TouchableOpacity key={t.k} style={[pc.tab, tab === t.k && pc.tabActive]} onPress={() => setTab(t.k)} activeOpacity={0.7}>
+            <Text style={[pc.tabTxt, tab === t.k && pc.tabTxtActive]}>{t.l}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
+
+        {/* ── OVERVIEW ── */}
+        {tab === 'overview' && (
+          playerSessions.length === 0 ? (
+            <View style={pc.empty}>
+              <Text style={{ fontSize: 52, marginBottom: 12 }}>🎯</Text>
+              <Text style={pc.emptyTitle}>No sessions yet</Text>
+              <Text style={pc.emptySub}>Tap ＋ to log your first poker session</Text>
+            </View>
+          ) : (
+            <>
+              <View style={pc.totalCard}>
+                <Text style={pc.totalLabel}>Total Bankroll</Text>
+                <Text style={[pc.totalVal, { color: totalNet >= 0 ? C.green : C.red }]}>
+                  {fmtNet(totalNet)}
+                </Text>
+              </View>
+              <Text style={pc.sectionTitle}>Summary</Text>
+              <View style={pc.card}>
+                <StatRow label="Buy-In" val={fmt(totalBuyInAmt)} />
+                <StatRow label="Cash-Out" val={fmt(totalCashOutAmt)} />
+                <StatRow label="Net Profit" val={fmtNet(totalNet)}
+                  col={totalNet >= 0 ? C.green : C.red} />
+              </View>
+              <Text style={pc.sectionTitle}>Sessions</Text>
+              <View style={pc.card}>
+                <StatRow label="Sessions" val={String(playerSessions.length)} />
+                <StatRow label="Hours" val={Math.round(totalHours) + 'h'} />
+                {totalHands > 0 && <StatRow label="Hands" val={totalHands.toLocaleString()} />}
+                <StatRow label="$/Hour" val={fmtNet(dolPerHour)}
+                  col={dolPerHour >= 0 ? C.green : C.red} />
+                {totalHands > 0 && <StatRow label="$/100 Hands" val={fmtNet(sessions100)}
+                  col={sessions100 >= 0 ? C.green : C.red} />}
+                <StatRow label="ROI" val={(roi >= 0 ? '+' : '-') + Math.abs(roi).toFixed(0) + '%'}
+                  col={roi >= 0 ? C.green : C.red} />
+                <StatRow label="Won" val={wonPct.toFixed(0) + '%'} col={wonPct >= 50 ? C.green : C.textSecondary} />
+                <StatRow label="Avg Buy-In" val={fmt(totalBuyInAmt / playerSessions.length)} />
+                <StatRow label="Avg Profit" val={fmtNet(totalNet / playerSessions.length)}
+                  col={totalNet / playerSessions.length >= 0 ? C.green : C.red} />
+              </View>
+            </>
+          )
+        )}
+
+        {/* ── SESSIONS ── */}
+        {tab === 'sessions' && (
+          playerSessions.length === 0 ? (
+            <View style={pc.empty}>
+              <Text style={pc.emptyTitle}>No sessions logged</Text>
+              <Text style={pc.emptySub}>Tap ＋ to add your first session</Text>
+            </View>
+          ) : [...playerSessions].sort((a, b) => b.startAt - a.startAt).map(s => {
+            const net = sNet(s), dur = sDurH(s);
+            const totalIn = s.buyIn + (s.rebuys||0) * (s.rebuyAmount||0);
+            const d = new Date(s.startAt);
+            const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+            const gameInitial = (s.game === 'nlhe' ? 'NL' : s.game === 'plo' ? 'PLO' : s.game?.slice(0,2).toUpperCase() || '??');
+            return (
+              <TouchableOpacity key={s.id} style={pc.sessCard}
+                onPress={() => { setEditItem(s); setShowAdd(true); }} activeOpacity={0.75}>
+
+                {/* Header row */}
+                <View style={pc.sessCardTop}>
+                  <View style={[pc.sessAvatar, { backgroundColor: net >= 0 ? C.greenDim : C.redDim }]}>
+                    <Text style={[pc.sessAvatarTxt, { color: net >= 0 ? C.green : C.red }]}>{gameInitial}</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={pc.sessTitle} numberOfLines={1}>{fmtGameLabel(s)}</Text>
+                    <Text style={pc.sessMeta} numberOfLines={1}>
+                      {s.location || 'Unknown'}  ·  {dateStr}
+                    </Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end', gap: 4 }}>
+                    <Text style={[pc.sessNet, { color: net >= 0 ? C.green : C.red }]}>{fmtNet(net)}</Text>
+                    {dur > 0 && <Text style={pc.sessDur}>{fmtH(dur)}</Text>}
+                  </View>
+                  <TouchableOpacity
+                    style={{ marginLeft: 10, padding: 4, alignSelf: 'center' }}
+                    onPress={() => Alert.alert('Delete Session', 'Remove this session?',
+                      [{ text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: () => deleteSession(s.id) }])}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <Text style={{ color: C.textMuted, fontSize: 18, lineHeight: 22 }}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Chips row */}
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
+                  {[
+                    { label: 'Buy-In', value: fmt(totalIn) },
+                    { label: 'Cash-Out', value: fmt(s.cashOut) },
+                    { label: 'Rebuys', value: (s.rebuys||0) > 0 ? `${s.rebuys}×` : '—' },
+                  ].map(chip => (
+                    <View key={chip.label} style={pc.sessChip}>
+                      <Text style={pc.sessChipLbl}>{chip.label}</Text>
+                      <Text style={pc.sessChipVal}>{chip.value}</Text>
+                    </View>
+                  ))}
+                </View>
+              </TouchableOpacity>
+            );
+          })
+        )}
+
+        {/* ── LOCATIONS ── */}
+        {tab === 'locations' && (
+          playerSessions.length === 0 ? (
+            <View style={pc.empty}>
+              <Text style={pc.emptyTitle}>No locations yet</Text>
+              <Text style={pc.emptySub}>Add sessions with locations to see stats here</Text>
+            </View>
+          ) : byLocation().map((loc, i) => {
+            const maxAbs = Math.max(...loc.list.map(s => Math.abs(sNet(s))), 1);
+            const avgNet = loc.sessions > 0 ? loc.net / loc.sessions : 0;
+            const losses = loc.sessions - loc.won;
+            const gameLabel = s => s.game === 'nlhe' ? "NL Hold'em" : s.game === 'plo' ? 'Omaha' : 'Other';
+            return (
+              <View key={i} style={pss.card}>
+                {/* Header row */}
+                <View style={pss.cardTop}>
+                  <View style={[pss.avatar, { backgroundColor: C.surfaceRaised, borderWidth: 1, borderColor: C.border }]}>
+                    <Text style={{ fontSize: 22 }}>📍</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={pss.playerName}>{loc.name}</Text>
+                    <Text style={pss.playerSub}>
+                      {loc.sessions} session{loc.sessions !== 1 ? 's' : ''} · {loc.won}W  {losses}L
+                    </Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={[pss.totalNet, { color: loc.net >= 0 ? C.green : C.red }]}>{fmtNet(loc.net)}</Text>
+                    <Text style={pss.totalNetLabel}>all-time net</Text>
+                  </View>
+                </View>
+
+                {/* Summary chips */}
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 12, marginBottom: 16 }}>
+                  {[
+                    { label: 'Total In',     value: fmt(loc.buyIn) },
+                    { label: 'Total Out',    value: fmt(loc.cashOut) },
+                    { label: 'Avg / Session', value: fmtNet(avgNet) },
+                  ].map(chip => (
+                    <View key={chip.label} style={pss.chip}>
+                      <Text style={pss.chipLabel}>{chip.label}</Text>
+                      <Text style={pss.chipValue}>{chip.value}</Text>
+                    </View>
+                  ))}
+                </View>
+
+                {/* Session history */}
+                <Text style={pss.chartLabel}>Session History</Text>
+                {loc.list.map((s, j) => {
+                  const net = sNet(s);
+                  const fillW = Math.max(6, (Math.abs(net) / maxAbs) * 130);
+                  const barColor = net > 0.005 ? C.green : net < -0.005 ? C.red : C.textMuted;
+                  const date = new Date(s.startAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                  return (
+                    <View key={j} style={pss.sessionRow}>
+                      <View style={pss.sessionLeft}>
+                        <Text style={pss.sessionName} numberOfLines={1}>{gameLabel(s)}</Text>
+                        <Text style={pss.sessionMeta}>{date} · in {fmt(s.buyIn)}</Text>
+                      </View>
+                      <View style={pss.barArea}>
+                        <View style={pss.barTrack}>
+                          <View style={[pss.barFill, { width: fillW, backgroundColor: barColor }]} />
+                        </View>
+                      </View>
+                      <Text style={[pss.sessionNet, { color: barColor }]}>{fmtNet(net)}</Text>
+                    </View>
+                  );
+                })}
+              </View>
+            );
+          })
+        )}
+      </ScrollView>
+
+      <AddSessionModal
+        visible={showAdd}
+        onClose={() => { setShowAdd(false); setEditItem(null); }}
+        initial={editItem}
+        onSave={s => editItem ? editSession({ ...editItem, ...s }) : addSession(s)}
+      />
+    </SafeAreaView>
+  );
+}
+
+const pc = StyleSheet.create({
+  root: { flex: 1, backgroundColor: C.bg },
+  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingTop: 12, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: C.border },
+  headerTitle: { flex: 1, color: C.text, fontSize: 20, fontWeight: '800', textAlign: 'center' },
+  addBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: C.blue, alignItems: 'center', justifyContent: 'center' },
+  addBtnTxt: { color: '#fff', fontSize: 22, fontWeight: '900', lineHeight: 28 },
+  tabBar: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: C.border, backgroundColor: C.surface },
+  tab: { flex: 1, paddingVertical: 11, alignItems: 'center' },
+  tabActive: { borderBottomWidth: 2, borderBottomColor: C.blue },
+  tabTxt: { color: C.textMuted, fontSize: 13, fontWeight: '600' },
+  tabTxtActive: { color: C.blue },
+  totalCard: { backgroundColor: C.surfaceAlt, borderRadius: 16, padding: 20, alignItems: 'center', marginBottom: 20, borderWidth: 1, borderColor: C.border },
+  totalLabel: { color: C.textMuted, fontSize: 13, fontWeight: '600', marginBottom: 6, letterSpacing: 0.5 },
+  totalVal: { fontSize: 42, fontWeight: '900', letterSpacing: -1 },
+  sectionTitle: { color: C.textMuted, fontSize: 12, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 8, marginTop: 4 },
+  card: { backgroundColor: C.surface, borderRadius: 14, paddingHorizontal: 16, marginBottom: 20, borderWidth: 1, borderColor: C.border },
+  statRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: C.border },
+  statLabel: { flex: 1, color: C.textSecondary, fontSize: 15 },
+  statVal: { color: C.text, fontSize: 15, fontWeight: '700' },
+  // Sessions tab — player-stats-style cards
+  sessCard: { backgroundColor: C.surface, borderRadius: 16, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: C.border },
+  sessCardTop: { flexDirection: 'row', alignItems: 'center' },
+  sessAvatar: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', marginRight: 12, flexShrink: 0 },
+  sessAvatarTxt: { fontSize: 12, fontWeight: '800' },
+  sessTitle: { color: C.text, fontSize: 16, fontWeight: '700', marginBottom: 2 },
+  sessMeta: { color: C.textMuted, fontSize: 12 },
+  sessNet: { fontSize: 20, fontWeight: '800' },
+  sessDur: { color: C.textMuted, fontSize: 11, marginTop: 2, textAlign: 'right' },
+  sessChip: { flex: 1, backgroundColor: C.surfaceRaised, borderRadius: 10, paddingVertical: 10, paddingHorizontal: 6, alignItems: 'center', borderWidth: 1, borderColor: C.border },
+  sessChipLbl: { color: C.textMuted, fontSize: 9, fontWeight: '700', letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 3 },
+  sessChipVal: { color: C.textSecondary, fontSize: 13, fontWeight: '700' },
+  chartCard: { backgroundColor: C.surface, borderRadius: 14, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: C.border },
+  // Locations tab — stat cells replacing small chips
+  locStatCell: { flex: 1, backgroundColor: C.surfaceRaised, borderRadius: 12, paddingVertical: 16, paddingHorizontal: 10, alignItems: 'center', borderWidth: 1, borderColor: C.border },
+  locStatVal: { color: C.text, fontSize: 17, fontWeight: '800', marginTop: 4 },
+  locStatLbl: { color: C.textMuted, fontSize: 10, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'center', marginBottom: 0 },
+  empty: { alignItems: 'center', paddingVertical: 60 },
+  emptyTitle: { color: C.textSecondary, fontSize: 20, fontWeight: '700', marginBottom: 8 },
+  emptySub: { color: C.textMuted, fontSize: 14, textAlign: 'center' },
+  // Form styles
+  fieldLbl: { color: C.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 0.5, marginBottom: 6, textTransform: 'uppercase' },
+  fieldInput: { backgroundColor: C.surfaceRaised, borderRadius: 10, padding: 12, color: C.text, fontSize: 15, borderWidth: 1, borderColor: C.border },
+  selBtn: { backgroundColor: C.surfaceRaised, borderRadius: 8, paddingVertical: 8, paddingHorizontal: 14, borderWidth: 1, borderColor: C.border },
+  selBtnOn: { backgroundColor: C.blue, borderColor: C.blue },
+  selTxt: { color: C.textSecondary, fontSize: 13, fontWeight: '600' },
+  nowBtn: { backgroundColor: C.blue, borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12, justifyContent: 'center' },
+  nowBtnTxt: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  pickerBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: C.surfaceRaised, borderRadius: 10, padding: 12, borderWidth: 1, borderColor: C.border, gap: 8 },
+  pickerBtnTxt: { color: C.text, fontSize: 15, fontWeight: '500', flex: 1 },
+  pickerIcon: { fontSize: 16 },
+});
+
 // ─── History Modal ────────────────────────────────────────────────────────────
 function HistoryModal({ visible, games, onNavigate, onDelete, onClose }) {
   const past = games.filter(g => !g.isActive);
@@ -1123,7 +2076,9 @@ function HistoryModal({ visible, games, onNavigate, onDelete, onClose }) {
               );
             })}
           </ScrollView>
-          <TouchableOpacity style={[ms.btn, { backgroundColor: C.blue, marginTop: 14 }]} onPress={onClose}>
+          <TouchableOpacity
+            style={{ backgroundColor: C.blue, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginTop: 14 }}
+            onPress={onClose}>
             <Text style={ms.confirmTxt}>Done</Text>
           </TouchableOpacity>
         </Pressable>
@@ -1138,7 +2093,7 @@ const hm = StyleSheet.create({
 });
 
 // ─── Home Screen ──────────────────────────────────────────────────────────────
-function HomeScreen({ onNavigate }) {
+function HomeScreen({ onNavigate, onPlayerCentral }) {
   const { games, roster, settled, isLocked, createGame, deleteGame,
     addToRoster, removeFromRoster, setRosterPhone, settleDebt, unsettleDebt, lockApp, unlockApp } = useStore();
   const [showModal, setShowModal] = useState(false);
@@ -1251,7 +2206,7 @@ function HomeScreen({ onNavigate }) {
                   [{ text: 'Cancel', style: 'cancel' }, { text: 'Lock', onPress: lockApp }])
               : unlockApp()
             }
-            trackColor={{ false: C.surfaceRaised, true: '#5c1a1a' }}
+            trackColor={{ false: C.surfaceRaised, true: C.red }}
             thumbColor={isLocked ? C.red : C.green}
             ios_backgroundColor={C.surfaceRaised}
           />
@@ -1275,7 +2230,7 @@ function HomeScreen({ onNavigate }) {
               ? Alert.alert('App is Locked', 'Unlock the app to view Stats.')
               : setShowStats(true)}
             activeOpacity={isLocked ? 1 : 0.7}>
-            <Text style={[hs.tabIcon, isLocked && { opacity: 0.35 }]}>📊</Text>
+            <Text style={[hs.tabIcon, isLocked && { opacity: 0.35 }]}>🏆</Text>
             <Text style={[hs.tabLabel, isLocked && { opacity: 0.35 }]}>Stats</Text>
           </TouchableOpacity>
 
@@ -1285,7 +2240,7 @@ function HomeScreen({ onNavigate }) {
               ? Alert.alert('App is Locked', 'Unlock the app to view Settle Up.')
               : setShowDebts(true)}
             activeOpacity={isLocked ? 1 : 0.7}>
-            <Text style={[hs.tabIcon, isLocked && { opacity: 0.35 }]}>💰</Text>
+            <Text style={[hs.tabIcon, isLocked && { opacity: 0.35 }]}>🤝</Text>
             <Text style={[hs.tabLabel, isLocked && { opacity: 0.35 }]}>Settle Up</Text>
             {debtCount > 0 && !isLocked && (
               <View style={hs.debtBadge}><Text style={hs.debtBadgeTxt}>{debtCount}</Text></View>
@@ -1293,8 +2248,13 @@ function HomeScreen({ onNavigate }) {
           </TouchableOpacity>
 
           <TouchableOpacity style={hs.tabItem} onPress={() => setShowHistory(true)} activeOpacity={0.7}>
-            <Text style={hs.tabIcon}>📋</Text>
+            <Text style={hs.tabIcon}>🕐</Text>
             <Text style={hs.tabLabel}>History</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={hs.tabItem} onPress={onPlayerCentral} activeOpacity={0.7}>
+            <Text style={hs.tabIcon}>📈</Text>
+            <Text style={hs.tabLabel}>Bankroll</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -1312,7 +2272,7 @@ function HomeScreen({ onNavigate }) {
                 <Text style={ms.cancelTxt}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity style={[ms.btn, { backgroundColor: C.green }]} onPress={handleCreate}>
-                <Text style={[ms.confirmTxt, { color: '#000' }]}>Start</Text>
+              <Text style={ms.confirmTxt}>Start</Text>
               </TouchableOpacity>
             </View>
           </Pressable>
@@ -1373,8 +2333,8 @@ const hs = StyleSheet.create({
     backgroundColor: C.surfaceRaised,
     borderWidth: 1, borderColor: C.border, borderStyle: 'dashed',
   },
-  newGameIcon: { color: '#000', fontSize: 20, fontWeight: '900', lineHeight: 22 },
-  newGameTxt: { color: '#000', fontSize: 16, fontWeight: '800' },
+  newGameIcon: { color: '#fff', fontSize: 20, fontWeight: '900', lineHeight: 22 },
+  newGameTxt: { color: '#fff', fontSize: 16, fontWeight: '800' },
 
   // Lock toggle row
   lockRow: {
@@ -1509,9 +2469,9 @@ function GameScreen({ id, onBack }) {
           ].map(s => (
             <View key={s.label} style={[
               gs.statBox,
-              s.accent && { borderColor: C.greenDim, backgroundColor: '#0d1f14' },
-              s.balOk && { borderColor: C.greenDim, backgroundColor: '#0d1f14' },
-              s.balErr && { borderColor: C.red, backgroundColor: '#1f0d0d' },
+              s.accent && { borderColor: C.green, backgroundColor: C.greenDim },
+              s.balOk && { borderColor: C.green, backgroundColor: C.greenDim },
+              s.balErr && { borderColor: C.red, backgroundColor: C.redDim },
             ]}>
               <Text
                 style={[
@@ -1578,7 +2538,7 @@ function GameScreen({ id, onBack }) {
                       <Text style={{ color: C.green, fontSize: 10, fontWeight: '800' }}>CASHED OUT</Text>
                     </View>}
                     {isLastActive && game.isActive && (
-                      <View style={{ backgroundColor: '#1a1500', borderRadius: 5, paddingHorizontal: 6, paddingVertical: 1 }}>
+                      <View style={{ backgroundColor: '#fef8e4', borderRadius: 5, paddingHorizontal: 6, paddingVertical: 1 }}>
                         <Text style={{ color: C.gold, fontSize: 10, fontWeight: '800' }}>LAST PLAYER</Text>
                       </View>
                     )}
@@ -1671,7 +2631,7 @@ function GameScreen({ id, onBack }) {
             <TouchableOpacity style={[gs.addBtn, { flex: 1, marginBottom: 0 }]} onPress={() => setModal({ type: 'addPlayer' })} activeOpacity={0.7}>
               <Text style={{ color: C.blue, fontSize: 15, fontWeight: '700' }}>+ Add Player</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={[gs.addBtn, { flex: 1, marginBottom: 0, borderColor: '#3d3510' }]} onPress={() => setModal({ type: 'drawSeats' })} activeOpacity={0.7}>
+            <TouchableOpacity style={[gs.addBtn, { flex: 1, marginBottom: 0, borderColor: C.gold }]} onPress={() => setModal({ type: 'drawSeats' })} activeOpacity={0.7}>
               <Text style={{ color: C.gold, fontSize: 15, fontWeight: '700' }}>♠ Draw Seats</Text>
             </TouchableOpacity>
           </View>
@@ -1762,23 +2722,29 @@ const gs = StyleSheet.create({
   shareBtn: { backgroundColor: C.greenDim, borderRadius: 16, paddingVertical: 16, alignItems: 'center', borderWidth: 1, borderColor: C.green },
   tableAmtCard: {
     backgroundColor: C.surface, borderRadius: 14, padding: 14, marginBottom: 16,
-    flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#3d3510',
+    flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: C.gold,
   },
   imbalanceBanner: {
-    backgroundColor: '#1f0d0d', borderRadius: 12, padding: 14, marginBottom: 20,
+    backgroundColor: C.redDim, borderRadius: 12, padding: 14, marginBottom: 20,
     borderWidth: 1, borderColor: C.red,
   },
   imbalanceTitle: { color: C.red, fontSize: 15, fontWeight: '700', marginBottom: 4 },
-  imbalanceSub: { color: '#cc8880', fontSize: 13, lineHeight: 18 },
+  imbalanceSub: { color: C.red, fontSize: 13, lineHeight: 18 },
 });
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 function App() {
   const [gameId, setGameId] = useState(null);
+  const [showPC, setShowPC] = useState(false);
   return (
     <SafeAreaProvider>
       <StoreProvider>
-        {gameId ? <GameScreen id={gameId} onBack={() => setGameId(null)} /> : <HomeScreen onNavigate={setGameId} />}
+        {gameId
+          ? <GameScreen id={gameId} onBack={() => setGameId(null)} />
+          : showPC
+          ? <PlayerCentralScreen onBack={() => setShowPC(false)} />
+          : <HomeScreen onNavigate={setGameId} onPlayerCentral={() => setShowPC(true)} />
+        }
       </StoreProvider>
     </SafeAreaProvider>
   );
