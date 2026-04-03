@@ -5,20 +5,27 @@
     "version": "1.0.0",
     "owner": "rohitsampath-organization",
     "orientation": "portrait",
-    "userInterfaceStyle": "dark",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
     "splash": {
+      "image": "./assets/icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#0a0a0a"
+      "backgroundColor": "#1a0c3c"
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.homepokertracker.app"
+      "bundleIdentifier": "com.homepokertracker.app",
+      "infoPlist": {
+        "NSContactsUsageDescription": "Used to import player names and phone numbers into your roster."
+      }
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#0a0a0a"
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1a0c3c"
       },
-      "package": "com.homepokertracker.app"
+      "package": "com.homepokertracker.app",
+      "permissions": ["android.permission.READ_CONTACTS"]
     },
     "extra": {
       "eas": {
